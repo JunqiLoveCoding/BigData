@@ -4,6 +4,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from enum import Enum
+import time
 
 def main():
     spark = SparkSession \
@@ -13,18 +14,18 @@ def main():
         .getOrCreate()
     spark_context = spark.sparkContext
     hadoop = spark_context._jvm.org.apache.hadoop
+    spark.conf.set("spark.sql.crossJoin.enabled", "true")
 
     fs = hadoop.fs.FileSystem
     conf = hadoop.conf.Configuration()
     path = hadoop.fs.Path('/user/hm74/NYCOpenData')
-    for nyc_open_datafile in fs.get(conf).listStatus(path)[0:2]:
+    for nyc_open_datafile in fs.get(conf).listStatus(path):
         # pretty hacky preprocessing but it will work for now
         # could maybe use pathlib library or get it with hdfs
         processed_path = str(nyc_open_datafile.getPath()).replace("hdfs://dumbo", "")
         df_nod = spark.read.option("header", "true").option("delimiter", "\t").csv(processed_path)
         bp = BasicProfiling(processed_path, df_nod)
-        type_dict = bp.process()
-        print(type_dict)
+        table_dict = bp.process()
 
 
 # We should put this in it's on package, but submitting with packages is kind of annoying so
@@ -47,71 +48,100 @@ class BasicProfiling:
         self.table_dict['dataset_name'] = self.dataset_name
         self.table_dict['columns'] = []
 
-    def __add_column_general_info(self, column, column_dict):
-        total_num = column.count()
-        column_dict['number_empty_cells'] = column.rdd.filter(lambda x: x.isNull()).count()
-        column_dict['number_non_empty_cells'] = total_num - column_dict['number_empty_cells']
-        column_dict['number_distinct_values'] = column.distinct().count()
-        column_dict['frequent_values'] = column.groupBy("name").count().orderBy(desc('count')).limit(5).select("name").rdd.flatMap(list).collect()
-        return column_dict
+    def __add_column_general_info(self, column, column_name):
+        general_count = column.select(lit(column_name).alias("name"), count(column_name).alias("count"), countDistinct(column_name).alias("distinct"))
+        general_empty = column.filter(col(column_name).isNull()).select(count(column_name).alias("empty"))
+        general_fre = column.groupBy(column_name).agg(count(column_name).alias("count")).orderBy(desc("count")).limit(5).agg(collect_list(column_name).alias('fre'))
+        return general_count, general_empty, general_fre
 
-    def _add_datatype_columns(self, column):
+    def _add_datatype_columns(self, column, column_name):
         """
         Adds a type column to add every column we currently have, obviously this doubles the size
         :return:
         """
         get_column_type_udf = udf(self.get_column_type)
-        column = column.withColumn("dtype", get_column_type_udf("name"))
+        column = column.withColumn("dtype", get_column_type_udf(column_name))
         return column
 
-    def __add_stats_to_column_dict(self, column, column_dict, spec_type):
-        """
-        Adding count, min, max, etc. to the specification of each column in the dataframe.
-        :return:
-        """
-        type_dict = {}
-        if spec_type == 'INT':
-            type_dict['type'] = "INTERGER(LONG)"
-            stats = column.filter("dtype = 'INT'").withColumn("name", column.name.cast('int')).select(countDistinct("name"), max("name"), min("name"), mean("name"), stddev("name")).collect()
-            type_dict['count'] = int(stats[0][0])
-            type_dict['max_value'] = int(stats[0][1])
-            type_dict['min_value'] = int(stats[0][2])
-            type_dict['mean'] = float(stats[0][3])
-            type_dict['stddev'] = float(stats[0][4])
-        elif spec_type == 'REAL':
-            type_dict['type'] = 'REAL'
-            stats = column.filter("dtype = 'REAL'").withColumn("name", column.name.cast('double')).select(countDistinct("name"), max("name"), min("name"), mean("name"), stddev("name")).collect()
-            type_dict['count'] = int(stats[0][0])
-            type_dict['max_value'] = float(stats[0][1])
-            type_dict['min_value'] = float(stats[0][2])
-            type_dict['mean'] = float(stats[0][3])
-            type_dict['stddev'] = float(stats[0][4])
-        elif spec_type == 'DATE':
-            type_dict['type'] = "DATE/TIME"
-            stats = column.filter("dtype = 'DATE'").select(countDistinct("name"), max("name"), min("name")).collect()
-            type_dict['count'] = int(stats[0][0])
-            type_dict['max_value'] = stats[0][1]
-            type_dict['min_value'] = stats[0][2]
-        else:
-            type_dict['type'] = "TEXT"
-            stats = column.withColumn("len", length("name"))
-            type_dict['count'] = stats.select("name").distinct().count()
-            type_dict['shortest_value'] = stats.orderBy(asc("len")).limit(5).select("name").rdd.map(lambda x: x[0]).collect()
-            type_dict['longest_value'] = stats.orderBy(desc("len")).limit(5).select("name").rdd.map(lambda x: x[0]).collect()
-            type_dict['average_length'] = stats.select(mean("len")).collect()[0][0]
-         
-        return type_dict
+    def __get_stats_int(self, column, column_name):
+        int_info = column.filter("dtype = 'INT'").withColumn(column_name, column[column_name].cast('int'))\
+            .select(array(count(column_name), max(column_name), min(column_name), mean(column_name), stddev(column_name)).alias('stats_int'))
+        return int_info
 
-    # def get_column_spec_dict(self, column_name):
-    #     for column_dict in self.table_dict['column_specification']:
-    #         if column_dict['column_name'] == column_name:
-    #             return column_dict
+    def __get_stats_double(self, column, column_name):
+        double_info = column.filter("dtype = 'REAL'").withColumn(column_name, column[column_name].cast('double')).\
+            select(array(count(column_name), max(column_name), min(column_name), mean(column_name), stddev(column_name)).alias('stats_double'))
+        return double_info
 
-    # def get_column_spec_type_dict(self, column_name, column_type):
-    #     column_name_dict = self.get_column_spec_dict(column_name)
-    #     for column_type_spec_dict in column_name_dict['data_types']:
-    #         if column_type_spec_dict['type'] == column_type:
-    #             return column_type_spec_dict
+    def __get_stats_date(self, column, column_name):
+        date_info = column.filter("dtype = 'DATE'")\
+            .select(array(count(column_name), max(column_name), min(column_name)).alias('stats_date'))
+        return date_info
+
+    def __get_stats_text(self, column, column_name):
+        df_len = column.filter("dtype = 'TEXT'").withColumn("len", length(column_name))
+        text_info = df_len.select(array(count(column_name), mean("len")).alias('stats_text'))
+        shortest = df_len.orderBy(asc("len")).limit(5).agg(collect_list(column_name).alias('shortest_values')).select('shortest_values')
+        longest = df_len.orderBy(desc("len")).limit(5).agg(collect_list(column_name).alias('longest_values')).select('longest_values')
+        return text_info, shortest, longest
+
+
+    def __convert_df_to_dict(self, integer, real, date, text, shortest, longest, count, empty, fre):
+        stats_int = integer.collect()
+        stats_double = real.collect()
+        stats_date = date.collect()
+        stats_text = text.collect()
+        stats_shortest = shortest.collect()
+        stats_longest = longest.collect()
+        general_count = count.collect()
+        general_empty = empty.collect()
+        general_fre = fre.collect()
+        for i in range(len(stats_int)):
+            column_dict = {}
+            column_stats = [general_count[i][0], stats_int[i][0], stats_double[i][0], stats_date[i][0], stats_text[i][0], stats_shortest[i][0], stats_longest[i][0]]
+            column_dict['column_name'] = column_stats[0]
+            column_dict['number_empty_cells'] = general_empty[i][0]
+            column_dict['number_non_empty_cells'] = general_count[i][1] - general_empty[i][0]
+            column_dict['number_distinct_values'] = general_count[i][2]
+            column_dict['frequent_values'] = general_fre[i][0]
+            column_dict['data_type'] = []
+            if column_stats[1][0] != 0:
+                type_dict = {}
+                type_dict['type'] = "INTERGER(LONG)"
+                type_dict['count'] = int(column_stats[1][0])
+                type_dict['max_value'] = int(column_stats[1][1])
+                type_dict['min_value'] = int(column_stats[1][2])
+                type_dict['mean'] = float(column_stats[1][3])
+                type_dict['stddev'] = float(column_stats[1][4])
+                column_dict['data_type'].append(type_dict)
+            if column_stats[2][0] != 0:
+                type_dict = {}
+                type_dict['type'] = 'REAL'
+                type_dict['count'] = int(column_stats[2][0])
+                type_dict['max_value'] = float(column_stats[2][1])
+                type_dict['min_value'] = float(column_stats[2][2])
+                type_dict['mean'] = float(column_stats[2][3])
+                type_dict['stddev'] = float(column_stats[2][4])
+                column_dict['data_type'].append(type_dict)
+            if column_stats[3][0] != '0':
+                type_dict = {}
+                type_dict['type'] = "DATE/TIME"
+                type_dict['count'] = int(column_stats[3][0])
+                type_dict['max_value'] = column_stats[3][1]
+                type_dict['min_value'] = column_stats[3][2]
+                column_dict['data_type'].append(type_dict)
+            if column_stats[4][0] != 0:
+                type_dict = {}
+                type_dict['type'] = "TEXT"
+                type_dict['count'] = column_stats[4][0]
+                type_dict['shortest_value'] = column_stats[5][0]
+                type_dict['longest_value'] = column_stats[6][0]
+                type_dict['average_length'] = column_stats[4][1]
+                column_dict['data_type'].append(type_dict)
+
+            print(column_dict)
+
+            self.table_dict['columns'].append(column_dict)
 
     @staticmethod
     def get_column_type(val):
@@ -126,6 +156,8 @@ class BasicProfiling:
             return 'REAL'
         elif BasicProfiling.__is_datetime(val):
             return 'DATE'
+        elif val is None:
+            return None
         else:
             return 'TEXT'
 
@@ -156,28 +188,51 @@ class BasicProfiling:
             return False
 
     def process(self):
+        start = time.time()
         self.__set_up_dictionary()
-        print(self.columns)
-        for column in self.columns:
-            print(column)
-            column_dict = {}
-            column_dict['column_name'] = column
-            # select the currently processed column and rename it as "name"
-            print("The process column is {}".format(column))
-            column = self.df_nod.select(col(column).alias("name"))
-            column_dict = self.__add_column_general_info(column, column_dict)
 
-            # generate type_dict
-            column_dict['data_type'] = [] 
-            column = self._add_datatype_columns(column)
-            types = column.select("dtype").distinct().collect()[:][0]
-            for spec_type in types:
-                type_dict = self.__add_stats_to_column_dict(column, column_dict, spec_type)
-                column_dict['data_type'].append(type_dict)
+        for i, column_name in enumerate(self.columns):
+            column = self.df_nod.select(column_name)
 
-            print(column_dict)
-            self.table_dict['columns'].append(column_dict)
-                
+            general_count, general_empty, general_fre = self.__add_column_general_info(column, column_name)
+
+            # # generate type_dict
+            column = self._add_datatype_columns(column, column_name)
+
+            stats_int = self.__get_stats_int(column, column_name)
+
+            stats_double = self.__get_stats_double(column, column_name)
+
+            stats_date = self.__get_stats_date(column, column_name)
+
+            stats_text, shortest, longest = self.__get_stats_text(column, column_name)
+
+            if i == 0:
+                stats_table_int = stats_int
+                stats_table_double = stats_double
+                stats_table_date = stats_date
+                stats_table_text = stats_text
+                table_shortest = shortest
+                table_longest = longest
+                general_table_count = general_count
+                general_table_empty = general_empty
+                general_table_fre = general_fre
+            else:
+                stats_table_int = stats_table_int.union(stats_int)
+                stats_table_double = stats_table_double.union(stats_double)
+                stats_table_date = stats_table_date.union(stats_date)
+                stats_table_text = stats_table_text.union(stats_text)
+                table_shortest = table_shortest.union(shortest)
+                table_longest = table_longest.union(longest)
+                general_table_count = general_table_count.union(general_count)
+                general_table_empty = general_table_empty.union(general_empty)
+                general_table_fre = general_table_fre.union(general_fre)
+
+        time1 = time.time()
+        print("The time to compute the stats is: %f" % (time1 - start))
+        self.__convert_df_to_dict(stats_table_int, stats_table_double, stats_table_date, stats_table_text, table_shortest, table_longest, general_table_count, general_table_empty, general_table_fre)
+        time2 = time.time()
+        print("The time to generate the dict is: %f" % (time2 - time1))
         return self.table_dict
 
 # Seems like there is a bug in pyspark when serializing enum class, will leave it in for now.
