@@ -1,3 +1,4 @@
+import time
 from dateutil import parser
 from pyspark.shell import sc
 from pyspark.sql import SparkSession
@@ -12,19 +13,38 @@ def main():
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
     spark_context = spark.sparkContext
+    conf = spark.sparkContext._conf.setAll(
+        [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
+         ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
+    spark.sparkContext.stop()
+    spark = SparkSession.builder.config(conf=conf).getOrCreate()
+    new_conf = spark.sparkContext._conf.getAll()
+    print(new_conf)
     hadoop = spark_context._jvm.org.apache.hadoop
 
     fs = hadoop.fs.FileSystem
     conf = hadoop.conf.Configuration()
     path = hadoop.fs.Path('/user/hm74/NYCOpenData')
-    for nyc_open_datafile in fs.get(conf).listStatus(path)[0:2]:
+    total_files = len(fs.get(conf).listStatus(path))
+    print(total_files)
+    start = time.time()
+    for i, nyc_open_datafile in enumerate(fs.get(conf).listStatus(path)):
+        print("processing {} of {}".format(i, total_files))
         # pretty hacky preprocessing but it will work for now
         # could maybe use pathlib library or get it with hdfs
         processed_path = str(nyc_open_datafile.getPath()).replace("hdfs://dumbo", "")
         df_nod = spark.read.option("header", "true").option("delimiter", "\t").csv(processed_path)
         bp = BasicProfiling(processed_path, df_nod)
-        type_dict = bp.process()
-        print(type_dict)
+        try:
+            start_process = time.time()
+            type_dict = bp.process()
+            end_process = time.time()
+            print(type_dict)
+            print("total process time {}".format(end_process - start_process))
+        except:
+            print("skipping number: {} file {}".format(i, processed_path))
+    end = time.time()
+    print(end - start)
 
 
 # We should put this in it's on package, but submitting with packages is kind of annoying so
@@ -47,12 +67,21 @@ class BasicProfiling:
         self.table_dict['dataset_name'] = self.dataset_name
         self.table_dict['columns'] = []
 
+    '''def __add_column_general_info(self, column, column_dict, column_name):
+        row = column.select(col("name").count().alias("total_num"), col("name").countDistinct().alias("dis_num")).withColumn("name", lit(column_name))
+        empty_row = column.filter(col("name").isNull()).select(col("name").count().alias("empty_num"))
+        fre_row = column.groupBy("name").count().orderBy(desc('count')).limit(5).select("name").rdd.flatMap(list).toDF("fre_list")
+        row = row.join(empty_row).join(fre_row)
+
+        return column_dict'''
+
     def __add_column_general_info(self, column, column_dict):
         total_num = column.count()
-        column_dict['number_empty_cells'] = column.rdd.filter(lambda x: x.isNull()).count()
+        column_dict['number_empty_cells'] = column.rdd.filter(lambda x: x is not None).count()
         column_dict['number_non_empty_cells'] = total_num - column_dict['number_empty_cells']
         column_dict['number_distinct_values'] = column.distinct().count()
-        column_dict['frequent_values'] = column.groupBy("name").count().orderBy(desc('count')).limit(5).select("name").rdd.flatMap(list).collect()
+        column_dict['frequent_values'] = column.groupBy("name").count().orderBy(desc('count')).limit(5).select(
+            "name").rdd.flatMap(list).collect()
         return column_dict
 
     def _add_datatype_columns(self, column):
@@ -126,6 +155,8 @@ class BasicProfiling:
             return 'REAL'
         elif BasicProfiling.__is_datetime(val):
             return 'DATE'
+        elif val is None:
+            return None
         else:
             return 'TEXT'
 
@@ -157,25 +188,32 @@ class BasicProfiling:
 
     def process(self):
         self.__set_up_dictionary()
-        print(self.columns)
+        # print(self.columns)
         for column in self.columns:
-            print(column)
+            # print(column)
             column_dict = {}
             column_dict['column_name'] = column
             # select the currently processed column and rename it as "name"
-            print("The process column is {}".format(column))
+            # print("The process column is {}".format(column))
             column = self.df_nod.select(col(column).alias("name"))
+            start = time.time()
             column_dict = self.__add_column_general_info(column, column_dict)
-
+            end = time.time()
+            print("total time add general info {}".format(end-start))
             # generate type_dict
             column_dict['data_type'] = [] 
+            start = time.time()
             column = self._add_datatype_columns(column)
+            end = time.time()
+            print("total add datatype {}".format(end - start))
             types = column.select("dtype").distinct().collect()[:][0]
+            start = time.time()
             for spec_type in types:
                 type_dict = self.__add_stats_to_column_dict(column, column_dict, spec_type)
                 column_dict['data_type'].append(type_dict)
-
-            print(column_dict)
+            end = time.time()
+            print("total time for add stats to column {}".format(end-start))
+            # print(column_dict)
             self.table_dict['columns'].append(column_dict)
                 
         return self.table_dict
