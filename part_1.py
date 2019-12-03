@@ -68,7 +68,7 @@ class BasicProfiling:
 
     def __add_column_general_info(self, column, column_name):
         general_count = column.select(lit(column_name).alias("name"), count(column_name).alias("count"), countDistinct(column_name).alias("distinct"))
-        general_empty = column.filter(col(column_name).isNull()).select(count(column_name).alias("empty"))
+        general_empty = column.filter(col(column_name).isNull()).fillna({column_name: '0'}).select(count(column_name).alias("empty"))
         general_fre = column.groupBy(column_name).agg(count(column_name).alias("count")).orderBy(desc("count")).limit(5).agg(collect_list(column_name).alias('fre'))
         return general_count, general_empty, general_fre
 
@@ -103,7 +103,6 @@ class BasicProfiling:
         longest = df_len.orderBy(desc("len")).limit(5).agg(collect_list(column_name).alias('longest_values')).select('longest_values')
         return text_info, shortest, longest
 
-
     def __convert_df_to_dict(self, integer, real, date, text, shortest, longest, count, empty, fre):
         stats_int = integer.collect()
         stats_double = real.collect()
@@ -119,7 +118,7 @@ class BasicProfiling:
             column_stats = [general_count[i][0], stats_int[i][0], stats_double[i][0], stats_date[i][0], stats_text[i][0], stats_shortest[i][0], stats_longest[i][0]]
             column_dict['column_name'] = column_stats[0]
             column_dict['number_empty_cells'] = general_empty[i][0]
-            column_dict['number_non_empty_cells'] = general_count[i][1] - general_empty[i][0]
+            column_dict['number_non_empty_cells'] = general_count[i][1]
             column_dict['number_distinct_values'] = general_count[i][2]
             column_dict['frequent_values'] = general_fre[i][0]
             column_dict['data_type'] = []
