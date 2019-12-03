@@ -1,3 +1,6 @@
+import json
+import os
+
 from dateutil import parser
 from pyspark.shell import sc
 from pyspark.sql import SparkSession
@@ -5,8 +8,9 @@ from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from enum import Enum
 import time
+import sys
 
-def main():
+def main(start_index, end_index):
     spark = SparkSession \
         .builder \
         .appName("big_data_prof") \
@@ -19,13 +23,27 @@ def main():
     fs = hadoop.fs.FileSystem
     conf = hadoop.conf.Configuration()
     path = hadoop.fs.Path('/user/hm74/NYCOpenData')
-    for nyc_open_datafile in fs.get(conf).listStatus(path):
+    total_files = len(fs.get(conf).listStatus(path)[start_index:end_index])
+    os.mkdir('job_{}_{}'.format(start_index, end_index))
+    for i, nyc_open_datafile in enumerate(fs.get(conf).listStatus(path)[start_index:end_index]):
+        print("processing {} of {}".format(i, total_files))
         # pretty hacky preprocessing but it will work for now
         # could maybe use pathlib library or get it with hdfs
         processed_path = str(nyc_open_datafile.getPath()).replace("hdfs://dumbo", "")
         df_nod = spark.read.option("header", "true").option("delimiter", "\t").csv(processed_path)
-        bp = BasicProfiling(processed_path, df_nod)
-        table_dict = bp.process()
+        try:
+            file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
+            print(file_name)
+            start_process = time.time()
+            bp = BasicProfiling(processed_path, df_nod)
+            table_dict = bp.process()
+            json_type = json.dumps(table_dict)
+            with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+') as f:
+                f.write(json_type)
+            end_process = time.time()
+            print("total process time {}".format(end_process - start_process))
+        except Exception as e:
+            print("unable to process because {}".format(e))
 
 
 # We should put this in it's on package, but submitting with packages is kind of annoying so
@@ -138,9 +156,6 @@ class BasicProfiling:
                 type_dict['longest_value'] = column_stats[6][0]
                 type_dict['average_length'] = column_stats[4][1]
                 column_dict['data_type'].append(type_dict)
-
-            print(column_dict)
-
             self.table_dict['columns'].append(column_dict)
 
     @staticmethod
@@ -228,11 +243,7 @@ class BasicProfiling:
                 general_table_empty = general_table_empty.union(general_empty)
                 general_table_fre = general_table_fre.union(general_fre)
 
-        time1 = time.time()
-        print("The time to compute the stats is: %f" % (time1 - start))
         self.__convert_df_to_dict(stats_table_int, stats_table_double, stats_table_date, stats_table_text, table_shortest, table_longest, general_table_count, general_table_empty, general_table_fre)
-        time2 = time.time()
-        print("The time to generate the dict is: %f" % (time2 - time1))
         return self.table_dict
 
 # Seems like there is a bug in pyspark when serializing enum class, will leave it in for now.
@@ -245,4 +256,6 @@ class BasicProfiling:
 
 
 if __name__ == "__main__":
-    main()
+    start_index = int(sys.argv[1])
+    end_index = int(sys.argv[2])
+    main(start_index, end_index)
