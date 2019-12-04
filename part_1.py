@@ -1,12 +1,11 @@
 import json
+import subprocess
+
 import os
 
 from dateutil import parser
-from pyspark.shell import sc
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
-from pyspark.sql.types import *
-from enum import Enum
 import time
 import sys
 
@@ -16,20 +15,16 @@ def main(start_index, end_index):
         .appName("big_data_prof") \
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
-    spark_context = spark.sparkContext
-    hadoop = spark_context._jvm.org.apache.hadoop
-    spark.conf.set("spark.sql.crossJoin.enabled", "true")
-
-    fs = hadoop.fs.FileSystem
-    conf = hadoop.conf.Configuration()
-    path = hadoop.fs.Path('/user/hm74/NYCOpenData')
-    total_files = len(fs.get(conf).listStatus(path)[start_index:end_index])
+    cmd = "hadoop fs -ls /user/hm74/NYCOpenData"
+    files = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+    pfiles = [(x.split()[7], int(x.split()[4])) for x in files[1:]]
+    pfiles_sorted = sorted(pfiles, key=lambda x: x[1])
     os.mkdir('job_{}_{}'.format(start_index, end_index))
-    for i, nyc_open_datafile in enumerate(fs.get(conf).listStatus(path)[start_index:end_index]):
-        print("processing {} of {}".format(i, total_files))
+    for i, nyc_open_datafile in enumerate(pfiles_sorted[start_index:end_index]):
+        print("processing number {} of {}".format(i+start_index, end_index))
         # pretty hacky preprocessing but it will work for now
         # could maybe use pathlib library or get it with hdfs
-        processed_path = str(nyc_open_datafile.getPath()).replace("hdfs://dumbo", "")
+        processed_path = nyc_open_datafile[0]
         df_nod = spark.read.option("header", "true").option("delimiter", "\t").csv(processed_path)
         try:
             file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
@@ -38,6 +33,8 @@ def main(start_index, end_index):
             bp = BasicProfiling(processed_path, df_nod)
             table_dict = bp.process()
             json_type = json.dumps(table_dict)
+            #write to hdfs
+            # spark.parallelize([json_type]).toDF().coalesce(1).write.mode('append').json('/user/gl758/big_data/job_{}_{}/{}'.format(start_index, end_index, file_name))
             with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+') as f:
                 f.write(json_type)
             end_process = time.time()
@@ -245,13 +242,6 @@ class BasicProfiling:
         self.__convert_df_to_dict(stats_table_int, stats_table_double, stats_table_date, stats_table_text, table_shortest, table_longest, general_table_count, general_table_empty, general_table_fre)
         return self.table_dict
 
-# Seems like there is a bug in pyspark when serializing enum class, will leave it in for now.
-# https://stackoverflow.com/questions/58071115/dict-object-has-no-attribute-member-names-problem-with-enum-class-while-us
-# class SpecType(Enum):
-#     INT = "INT"
-#     REAL = "REAL"
-#     DATE = "DATE"
-#     TEXT = "TEXT"
 
 
 if __name__ == "__main__":
