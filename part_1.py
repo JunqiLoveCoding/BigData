@@ -15,13 +15,13 @@ def main(start_index, end_index):
         .appName("big_data_prof") \
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
-    conf = spark.sparkContext._conf.setAll(
-        [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
-         ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
-    spark.sparkContext.stop()
-    spark = SparkSession.builder.config(conf=conf).getOrCreate()
-    new_conf = spark.sparkContext._conf.getAll()
-    print(new_conf)
+    # conf = spark.sparkContext._conf.setAll(
+    #     [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
+    #      ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
+    # spark.sparkContext.stop()
+    # spark = SparkSession.builder.config(conf=conf).getOrCreate()
+    # new_conf = spark.sparkContext._conf.getAll()
+    # print(new_conf)
     cmd = "hadoop fs -ls /user/hm74/NYCOpenData"
     files = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
     pfiles = [(x.split()[7], int(x.split()[4])) for x in files[1:]]
@@ -41,8 +41,8 @@ def main(start_index, end_index):
             table_dict = bp.process()
             json_type = json.dumps(table_dict)
             #write to hdfs
-            # spark.parallelize([json_type]).toDF().coalesce(1).write.mode('append').json('/user/gl758/big_data/job_{}_{}/{}'.format(start_index, end_index, file_name))
-            with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+') as f:
+            # spark.parallelize([json_type]).toDF().coalesce(1).write.json('/user/gl758/big_data/job_{}_{}/{}'.format(start_index, end_index, file_name))
+            with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+', encoding="utf-8") as f:
                 f.write(json_type)
             end_process = time.time()
             print("total process time {}".format(end_process - start_process))
@@ -208,7 +208,8 @@ class BasicProfiling:
 
     @staticmethod
     def __get_datetime(val):
-        return parser.parse(val)
+        #tried to give actual timestamp, but then we can't put it into array, so instead I'm giving iso format
+        return parser.parse(val).isoformat()
 
 
     def process(self):
