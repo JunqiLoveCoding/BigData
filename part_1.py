@@ -15,6 +15,13 @@ def main(start_index, end_index):
         .appName("big_data_prof") \
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
+    conf = spark.sparkContext._conf.setAll(
+        [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
+         ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
+    spark.sparkContext.stop()
+    spark = SparkSession.builder.config(conf=conf).getOrCreate()
+    new_conf = spark.sparkContext._conf.getAll()
+    print(new_conf)
     cmd = "hadoop fs -ls /user/hm74/NYCOpenData"
     files = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
     pfiles = [(x.split()[7], int(x.split()[4])) for x in files[1:]]
@@ -89,8 +96,9 @@ class BasicProfiling:
         return double_info
 
     def __get_stats_date(self, column, column_name):
-        date_info = column.filter("dtype = 'DATE'")\
-            .select(array(count(column_name), max(column_name), min(column_name)).alias('stats_date'))
+        udf_cast_date = udf(BasicProfiling.__get_datetime)
+        date_info = column.filter("dtype = 'DATE'").select(array(count(column_name), max(udf_cast_date(column_name)),
+                                                                 min(udf_cast_date(column_name))).alias('stats_date'))
         return date_info
 
     def __get_stats_text(self, column, column_name):
@@ -198,6 +206,11 @@ class BasicProfiling:
         except:
             return False
 
+    @staticmethod
+    def __get_datetime(val):
+        return parser.parse(val)
+
+
     def process(self):
         start = time.time()
         self.__set_up_dictionary()
@@ -241,7 +254,6 @@ class BasicProfiling:
 
         self.__convert_df_to_dict(stats_table_int, stats_table_double, stats_table_date, stats_table_text, table_shortest, table_longest, general_table_count, general_table_empty, general_table_fre)
         return self.table_dict
-
 
 
 if __name__ == "__main__":
