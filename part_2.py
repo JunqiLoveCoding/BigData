@@ -3,7 +3,7 @@ import re
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import udf, monotonically_increasing_id, trim, col, \
-    regexp_replace, levenshtein, lower, explode, length, collect_list, array_union, array_intersect, size
+    regexp_replace, levenshtein, lower, explode, length, collect_list, array_union, array_intersect, size, lpad, rpad
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, RegexTokenizer, NGram
 from pyspark.sql.types import StringType, StructType
 
@@ -116,17 +116,22 @@ def main():
      'myei-c3fa.Neighborhood_1.txt.gz', 'upwt-zvh3.SCHOOL_LEVEL_.txt.gz', 'aiww-p3af.School_Phone_Number.txt.gz',
      'kiv2-tbus.Vehicle_Make.txt.gz', 'weg5-33pj.SCHOOL_LEVEL_.txt.gz',
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
+    db_list = ['kiv2-tbus.Vehicle_Make.txt.gz']
     #strategy pattern usually you would have a class then extend and apply, but this will do.
-    functions = [count_car_make, count_parks, count_website, count_business, count_building_code]
+    functions = [count_vehicle_type, count_car_make, count_parks, count_website, count_business, count_building_code]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
+    regex_tokenizer_pad = RegexTokenizer(inputCol="_c0_pad", outputCol="letters_pad", pattern="")
     ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
-    pipeline = [tokenizer, remover, regex_tokenizer, ngram]
+    ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
+    pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
     for file in db_list[0:3]:
         processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
         df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
         df_to_process = df_to_process.withColumn("id", monotonically_increasing_id())
+        pad_udf = udf(pad_custom)
+        df_to_process = df_to_process.withColumn('_c0_pad', pad_udf("_c0"))
         for stage in pipeline:
             df_to_process = stage.transform(df_to_process)
         for function in functions:
@@ -171,12 +176,17 @@ def count_building_code(df_to_process):
 
 
 def count_car_make(df_to_process):
-    #obtained csv file from
-    #https://github.com/arthurkao/vehicle-make-model-data
-    df_car_make = spark.read.option("header", "true").option("delimiter", ",").csv('/user/gl758/hd/car_make.csv')
-    df_processed = df_to_process.join(df_car_make, levenshtein(lower(df_to_process._c0), lower(df_car_make.make)) < 2)
+    df_processed = df_to_process.join(df_pre_car_make, levenshtein(lower(df_to_process._c0), lower(df_pre_car_make._c0)) < 3)
+    # df_processed = calc_jaccard_sim(df_to_process, df_pre_car_make)
     df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
-    return 'Car make', df_left, df_processed.count()
+    return 'Car make', df_left, df_processed.select("id").distinct().count()
+
+
+def count_vehicle_type(df_to_process):
+    # df_processed = df_to_process.join(df_pre_vehicle_type, levenshtein(lower(df_to_process._c0), lower(df_pre_vehicle_type._c0)) < 2)
+    df_processed = calc_jaccard_sim(df_to_process, df_pre_vehicle_type)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'Vehicle Type', df_left, df_processed.select("id").distinct().count()
 
 
 def count_parks(df_to_process):
@@ -193,6 +203,24 @@ def count_business(df_to_process):
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
     return 'Business Name', df_left, df_processed.count()
+
+
+def pre_compute_vehicle_type():
+    #https://data.ny.gov/Transportation/Vehicle-Makes-and-Body-Types-Most-Popular-in-New-Y/3pxy-wy2i
+    df_vehicle_type = spark.read.option("header", "true").option("delimiter", ",").csv('/user/gl758/hd/vehicle_type.csv')
+    df_vehicle_type = df_vehicle_type.select("Body Type").filter(col("Body Type") != "????").distinct()
+    df_vehicle_type = df_vehicle_type.withColumnRenamed("Body Type", "_c0")
+    df_vehicle_type = pre_compute_transformer(df_vehicle_type)
+    return df_vehicle_type
+
+
+def pre_compute_car_make():
+    # obtained csv file from
+    # https://github.com/arthurkao/vehicle-make-model-data
+    df_car_make = spark.read.option("header", "true").option("delimiter", ",").csv('/user/gl758/hd/car_make.csv')
+    df_car_make = df_car_make.withColumnRenamed("make", "_c0")
+    df_car_make = pre_compute_transformer(df_car_make)
+    return df_car_make
 
 
 def pre_compute_park():
@@ -251,6 +279,22 @@ def pre_compute_business():
     return df_park_names_array
 
 
+def pre_compute_transformer(df_to_process):
+    # lpad and rpad are complete trash and don't take column length, have to make udf, incompetence is high
+    pad_udf = udf(pad_custom)
+    df_to_process = df_to_process.withColumn('_c0_pad', pad_udf("_c0"))
+    tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
+    remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
+    regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
+    regex_tokenizer_pad = RegexTokenizer(inputCol="_c0_pad", outputCol="letters_pad", pattern="")
+    ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
+    ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
+    pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
+    for stage in pipeline:
+        df_to_process = stage.transform(df_to_process)
+    return df_to_process
+
+
 def get_tokens_match_over_diff(df_to_process):
     df_processed = df_to_process.withColumn("score", size(array_intersect("token_filtered", "to_match"))/size("token_filtered"))
     return df_processed
@@ -267,8 +311,21 @@ def get_top_n_in_array(df_lookup, top):
         collect_list("col")).withColumnRenamed("collect_list(col)", "to_match")
     return df_lookup
 
-# def calc_jaccard_sim():
 
+def calc_jaccard_sim(df_to_process, df_match, thresh=.3, padded=True):
+    if padded:
+        df_processed = df_to_process.join(df_match,
+                           (size(array_intersect(df_to_process.ngrams_pad, df_match.ngrams_pad)) /
+                            size(array_union(df_to_process.ngrams_pad, df_match.ngrams_pad))) > thresh)
+    else:
+        df_processed = df_to_process.join(df_match,
+                           (size(array_intersect(df_to_process.ngrams, df_match.ngrams)) /
+                            size(array_union(df_to_process.ngrams, df_match.ngrams))) > thresh)
+    return df_processed
+
+
+def pad_custom(val):
+    return "^^{}$$".format(val)
 
 if __name__ == "__main__":
     spark = SparkSession \
@@ -280,4 +337,8 @@ if __name__ == "__main__":
     df_pre_park = df_pre_park.cache()
     df_pre_business = pre_compute_business()
     df_pre_business = df_pre_business.cache()
+    df_pre_car_make = pre_compute_car_make()
+    df_pre_car_make.cache()
+    df_pre_vehicle_type = pre_compute_vehicle_type()
+    df_pre_vehicle_type.cache()
     main()
