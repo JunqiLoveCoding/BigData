@@ -2,7 +2,10 @@ import os
 import re
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, monotonically_increasing_id, trim, col, regexp_replace, levenshtein
+from pyspark.sql.functions import udf, monotonically_increasing_id, trim, col, \
+    regexp_replace, levenshtein, lower, explode, length, collect_list, array_union, array_intersect, size
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, RegexTokenizer, NGram
+from pyspark.sql.types import StringType, StructType
 
 
 def main():
@@ -114,15 +117,23 @@ def main():
      'kiv2-tbus.Vehicle_Make.txt.gz', 'weg5-33pj.SCHOOL_LEVEL_.txt.gz',
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
     #strategy pattern usually you would have a class then extend and apply, but this will do.
-    functions = [count_website, count_car_make]
+    functions = [count_car_make, count_parks, count_website, count_business, count_building_code]
+    tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
+    remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
+    regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
+    ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
+    pipeline = [tokenizer, remover, regex_tokenizer, ngram]
     for file in db_list[0:3]:
         processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
         df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
         df_to_process = df_to_process.withColumn("id", monotonically_increasing_id())
+        for stage in pipeline:
+            df_to_process = stage.transform(df_to_process)
         for function in functions:
             print("processing file {} function {}".format(file, function))
             sem_name, df_to_process, count = function(df_to_process)
             print("sem_name {}, count {}, count left {}".format(sem_name, count, df_to_process.count()))
+
 
 def website_regex(val):
     # https://stackoverflow.com/questions/7160737/python-how-to-validate-a-url-in-python-malformed-or-not
@@ -145,12 +156,118 @@ def count_website(df_to_process):
     return 'Websites', df_left, df_processed.count()
 
 
+def building_code_regex(val):
+    regex = re.compile(r'^[a-zA-Z][0-9].*')
+    return re.match(regex, val) is not None
+
+
+def count_building_code(df_to_process):
+    udf_building_code_regex = udf(building_code_regex)
+    df_to_process2 = df_to_process.withColumn("_c0_trim", regexp_replace(col("_c0"), "\\s+", ""))
+    df_processed = df_to_process2.filter(udf_building_code_regex(df_to_process2._c0_trim) == True)
+    df_left = df_to_process2.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_left.drop("_c0_trim")
+    return 'Websites', df_left, df_processed.count()
+
+
 def count_car_make(df_to_process):
-    df_car_make = spark.read.option("header", "true").option("delimiter", ",").csv('/user/gl758/car_make.csv')
-    df_processed = df_to_process.join(df_car_make, levenshtein(df_to_process._c0, df_car_make.make) < 2)
-    df_processed.count()
+    #obtained csv file from
+    #https://github.com/arthurkao/vehicle-make-model-data
+    df_car_make = spark.read.option("header", "true").option("delimiter", ",").csv('/user/gl758/hd/car_make.csv')
+    df_processed = df_to_process.join(df_car_make, levenshtein(lower(df_to_process._c0), lower(df_car_make.make)) < 2)
     df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
     return 'Car make', df_left, df_processed.count()
+
+
+def count_parks(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_park)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'Parks/Playgrounds', df_left, df_processed.count()
+
+
+def count_business(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_business)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'Business Name', df_left, df_processed.count()
+
+
+def pre_compute_park():
+    list_park_names = ["zone", "park", "playground", "plgd", "beach", "east", "rockaway", "parkway", "south", "river",
+                       "pond", "malls", "fort", "island", "meadow", "hill", "west", "lake", "coney", "crotona", "north",
+                       "kissena", "alley", "point", "ocean", "field", "highbridge", "area", "lot", "landscape",
+                       "courts", "bronx", "tot", "grove", "one", "fields", "washington", "broadway", "st.", "inwood",
+                       "highland", "waterfront", "road", "dr.", "shore", "eastern", "cunningham", "hook", "riverside",
+                       "red", "canarsie", "mall", "woods", "baisley", "center", "prospect", "marine", "soundview",
+                       "morningside", "square", "esplanade", "battery", "cedar", "claremont", "upper", "tryon",
+                       "corridor", "juniper", "lower", "house", "pedestrian", "lawn", "mary's", "mccarren", "tennis",
+                       "pelham", "valley", "van", "greene", "walk", "memorial", "clove", "central", "lincoln",
+                       "promenade", "brookville", "lakes", "bay", "nicholas", "orchard", "trail", "cortlandt",
+                       "mosholu", "parade", "pool", "silver", "heron", "marcus", "conference", "high"]
+    df_park_names_array = spark.createDataFrame(list_park_names, StringType()).select(collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    # df_parks = spark.read.option("delimiter", ",").csv('/user/gl758/hd/park_names.csv')
+    # df_park_names = df_parks.select('_c4').distinct()
+    # df_park_names = df_park_names.withColumnRenamed("_c4", "_c0")
+    # df_park_names_array = get_top_n_in_array(df_park_names, 200)
+    return df_park_names_array
+
+
+def pre_compute_business():
+    list_business_names = ["inc.", "inc", "corp.", "llc", "corp", "deli", "construction", "grocery", "auto", "new",
+                           "food", "contracting", "wireless", "laundromat", "home", "michael", "john", "market",
+                           "corporation", "cleaners", "joseph", "group", "parking", "robert", "construction,",
+                           "services", "gourmet", "general", "david", "anthony", "shop", "james", "jose", "ltd.",
+                           "service", "street", "improvement", "store", "repair", "grocery,", "richard", "laundry",
+                           "william", "design", "avenue", "convenience", "jewelry", "mini", "thomas", "center",
+                           "daniel", "management", "services,", "york", "star", "express", "ave", "christopher", "park",
+                           "cleaners,", "east", "singh,", "restaurant", "dry", "laundromat,", "city", "best", "george",
+                           "builders", "frank", "peter", "luis", "nyc", "contracting,", "towing", "gold", "garage",
+                           "candy", "group,", "steven", "paul", "enterprises", "juan", "one", "restoration", "jr,",
+                           "mobile", "deli,", "mark", "incorporated", "electronics", "grill", "west", "usa", "stop",
+                           "meat", "edward", "medical", "carlos", "charles", "mohammed", "mart", "st.", "co.,", "tire",
+                           "kevin", "green", "rodriguez,", "renovation", "development", "super", "car", "company",
+                           "nicholas", "solutions", "pharmacy", "andrew", "news", "market,", "recovery", "remodeling",
+                           "broadway", "sales", "family", "contractors", "collision", "american", "painting", "fruit",
+                           "mohammad", "cleaner", "brian", "supply", "l.l.c.", "supermarket", "king", "trading",
+                           "smoke", "improvements", "international", "discount", "renovations", "vincent", "lee,",
+                           "cafe", "matthew", "enterprises,", "patrick", "island", "tech", "brothers", "kim,",
+                           "brooklyn", "stephen", "victor", "ronald", "body", "mohamed", "eric", "lucky", "jason",
+                           "kenneth", "ali", "jonathan", "plus", "williams,", "alexander", "world", "associates,",
+                           "ltd", "building", "clean", "united", "interiors", "jeffrey", "fresh", "ave.", "automotive",
+                           "first", "metro", "ny,", "associates", "gonzalez,", "farm", "wash", "maria", "sons",
+                           "smith,", "maintenance", "care", "big", "furniture", "angel", "quality", "computer", "chen,",
+                           "louis", "enterprise", "lopez,", "custom"]
+    df_park_names_array = spark.createDataFrame(list_business_names, StringType()).select(
+        collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    # df_business = spark.read.option("header", "true").option("delimiter", "\t").csv('/user/hm74/NYCOpenData/w7w3-xahh.tsv.gz')
+    # df_business_names = df_business.select('Business Name').distinct().where(col("Business Name").isNotNull())
+    # df_business_names = df_business_names.withColumnRenamed('Business Name', "_c0")
+    # df_business_names_array = get_top_n_in_array(df_business_names, 200)
+    return df_park_names_array
+
+
+def get_tokens_match_over_diff(df_to_process):
+    df_processed = df_to_process.withColumn("score", size(array_intersect("token_filtered", "to_match"))/size("token_filtered"))
+    return df_processed
+
+
+def get_top_n_in_array(df_lookup, top):
+    df_lookup = df_lookup.select('_c0').distinct()
+    tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
+    remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
+    df_lookup = tokenizer.transform(df_lookup)
+    df_lookup = remover.transform(df_lookup)
+    df_lookup = df_lookup.select((explode("token_filtered"))).groupby("col").count().sort('count', ascending=False)
+    df_lookup = df_lookup.filter(length("col") > 2).limit(top).select(
+        collect_list("col")).withColumnRenamed("collect_list(col)", "to_match")
+    return df_lookup
+
+# def calc_jaccard_sim():
 
 
 if __name__ == "__main__":
@@ -159,4 +276,8 @@ if __name__ == "__main__":
         .appName("big_data_proj_part2") \
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
+    df_pre_park = pre_compute_park()
+    df_pre_park = df_pre_park.cache()
+    df_pre_business = pre_compute_business()
+    df_pre_business = df_pre_business.cache()
     main()
