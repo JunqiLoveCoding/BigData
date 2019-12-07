@@ -2,10 +2,10 @@ import os
 import re
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, monotonically_increasing_id, trim, col, \
-    regexp_replace, levenshtein, lower, explode, length, collect_list, array_union, array_intersect, size, lpad, rpad
+import pyspark.sql.functions as F
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, RegexTokenizer, NGram
-from pyspark.sql.types import StringType, StructType
+from pyspark.sql.types import StringType, StructType, StructField, IntegerType
+import time
 
 
 def main():
@@ -116,9 +116,9 @@ def main():
      'myei-c3fa.Neighborhood_1.txt.gz', 'upwt-zvh3.SCHOOL_LEVEL_.txt.gz', 'aiww-p3af.School_Phone_Number.txt.gz',
      'kiv2-tbus.Vehicle_Make.txt.gz', 'weg5-33pj.SCHOOL_LEVEL_.txt.gz',
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
-    db_list = ['kiv2-tbus.Vehicle_Make.txt.gz']
     #strategy pattern usually you would have a class then extend and apply, but this will do.
-    functions = [count_vehicle_type, count_car_make, count_parks, count_website, count_business, count_building_code]
+    functions = [count_website, count_vehicle_type, count_car_make, count_parks, count_business, count_building_code,
+                 count_location_type]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
@@ -129,15 +129,23 @@ def main():
     for file in db_list[0:3]:
         processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
         df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
-        df_to_process = df_to_process.withColumn("id", monotonically_increasing_id())
-        pad_udf = udf(pad_custom)
+        df_to_process = df_to_process.withColumn("id", F.monotonically_increasing_id())
+        pad_udf = F.udf(pad_custom)
         df_to_process = df_to_process.withColumn('_c0_pad', pad_udf("_c0"))
         for stage in pipeline:
             df_to_process = stage.transform(df_to_process)
-        for function in functions:
+        start = time.time()
+        for i, function in enumerate(functions):
             print("processing file {} function {}".format(file, function))
-            sem_name, df_to_process, count = function(df_to_process)
-            print("sem_name {}, count {}, count left {}".format(sem_name, count, df_to_process.count()))
+            sem_name, df_to_process, df_processed = function(df_to_process)
+            if i == 0:
+                df_full = df_processed
+            else:
+                df_full = df_full.union(df_processed)
+            print("sem name {}".format(sem_name))
+            # print("sem_name {}, count {}, count left {}".format(sem_name, count, df_to_process.count()))
+        df_full.groupBy("sem_type").agg({"id": "count"}).show()
+        print("process time {}".format(time.time() - start))
 
 
 def website_regex(val):
@@ -152,13 +160,17 @@ def website_regex(val):
     return re.match(regex, val) is not None
 
 
+# def count_other(df_to_process, file):
+#     return df_to_process.select("id", F.lit("Other").alias("sem_type"), F.lit(file).alias("file")).distinct()
+
+
 def count_website(df_to_process):
-    udf_website_regex = udf(website_regex)
-    df_to_process2 = df_to_process.withColumn("_c0_trim", regexp_replace(col("_c0"), "\\s+", ""))
+    udf_website_regex = F.udf(website_regex)
+    df_to_process2 = df_to_process.withColumn("_c0_trim", F.regexp_replace(F.col("_c0"), "\\s+", ""))
     df_processed = df_to_process2.filter(udf_website_regex(df_to_process2._c0_trim) == True)
     df_left = df_to_process2.join(df_processed, ["id", "id"], "leftanti")
     df_left = df_left.drop("_c0_trim")
-    return 'Websites', df_left, df_processed.count()
+    return 'Websites', df_left, df_processed.select("id", F.lit('Websites').alias("sem_type")).distinct()
 
 
 def building_code_regex(val):
@@ -167,26 +179,26 @@ def building_code_regex(val):
 
 
 def count_building_code(df_to_process):
-    udf_building_code_regex = udf(building_code_regex)
-    df_to_process2 = df_to_process.withColumn("_c0_trim", regexp_replace(col("_c0"), "\\s+", ""))
+    udf_building_code_regex = F.udf(building_code_regex)
+    df_to_process2 = df_to_process.withColumn("_c0_trim", F.regexp_replace(F.col("_c0"), "\\s+", ""))
     df_processed = df_to_process2.filter(udf_building_code_regex(df_to_process2._c0_trim) == True)
     df_left = df_to_process2.join(df_processed, ["id", "id"], "leftanti")
     df_left = df_left.drop("_c0_trim")
-    return 'Websites', df_left, df_processed.count()
+    return 'Building Code', df_left, df_processed.select("id", F.lit('Building Code').alias("sem_type")).distinct()
 
 
 def count_car_make(df_to_process):
-    df_processed = df_to_process.join(df_pre_car_make, levenshtein(lower(df_to_process._c0), lower(df_pre_car_make._c0)) < 3)
+    df_processed = df_to_process.join(df_pre_car_make, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_to_process, df_pre_car_make)
     df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
-    return 'Car make', df_left, df_processed.select("id").distinct().count()
+    return 'Car make', df_left, df_processed.select("id", F.lit('Car make').alias("sem_type")).distinct()
 
 
 def count_vehicle_type(df_to_process):
     # df_processed = df_to_process.join(df_pre_vehicle_type, levenshtein(lower(df_to_process._c0), lower(df_pre_vehicle_type._c0)) < 2)
     df_processed = calc_jaccard_sim(df_to_process, df_pre_vehicle_type)
     df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
-    return 'Vehicle Type', df_left, df_processed.select("id").distinct().count()
+    return 'Vehicle Type', df_left, df_processed.select("id", F.lit('Vehicle Type').alias("sem_type")).distinct()
 
 
 def count_parks(df_to_process):
@@ -194,7 +206,7 @@ def count_parks(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
-    return 'Parks/Playgrounds', df_left, df_processed.count()
+    return 'Parks/Playgrounds', df_left, df_processed.select("id", F.lit('Parks/Playgrounds').alias("sem_type")).distinct()
 
 
 def count_business(df_to_process):
@@ -202,13 +214,19 @@ def count_business(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
-    return 'Business Name', df_left, df_processed.count()
+    return 'Business Name', df_left, df_processed.select("id", F.lit('Business Name').alias("sem_type")).distinct()
 
+def count_location_type(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_location_type)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'Location Type', df_left, df_processed.select("id", F.lit("Location Type").alias("sem_type")).distinct()
 
 def pre_compute_vehicle_type():
     #https://data.ny.gov/Transportation/Vehicle-Makes-and-Body-Types-Most-Popular-in-New-Y/3pxy-wy2i
     df_vehicle_type = spark.read.option("header", "true").option("delimiter", ",").csv('/user/gl758/hd/vehicle_type.csv')
-    df_vehicle_type = df_vehicle_type.select("Body Type").filter(col("Body Type") != "????").distinct()
+    df_vehicle_type = df_vehicle_type.select("Body Type").filter(F.col("Body Type") != "????").distinct()
     df_vehicle_type = df_vehicle_type.withColumnRenamed("Body Type", "_c0")
     df_vehicle_type = pre_compute_transformer(df_vehicle_type)
     return df_vehicle_type
@@ -235,7 +253,7 @@ def pre_compute_park():
                        "pelham", "valley", "van", "greene", "walk", "memorial", "clove", "central", "lincoln",
                        "promenade", "brookville", "lakes", "bay", "nicholas", "orchard", "trail", "cortlandt",
                        "mosholu", "parade", "pool", "silver", "heron", "marcus", "conference", "high"]
-    df_park_names_array = spark.createDataFrame(list_park_names, StringType()).select(collect_list("value")).withColumnRenamed(
+    df_park_names_array = spark.createDataFrame(list_park_names, StringType()).select(F.collect_list("value")).withColumnRenamed(
         "collect_list(value)", "to_match")
     # df_parks = spark.read.option("delimiter", ",").csv('/user/gl758/hd/park_names.csv')
     # df_park_names = df_parks.select('_c4').distinct()
@@ -270,7 +288,7 @@ def pre_compute_business():
                            "smith,", "maintenance", "care", "big", "furniture", "angel", "quality", "computer", "chen,",
                            "louis", "enterprise", "lopez,", "custom"]
     df_park_names_array = spark.createDataFrame(list_business_names, StringType()).select(
-        collect_list("value")).withColumnRenamed(
+        F.collect_list("value")).withColumnRenamed(
         "collect_list(value)", "to_match")
     # df_business = spark.read.option("header", "true").option("delimiter", "\t").csv('/user/hm74/NYCOpenData/w7w3-xahh.tsv.gz')
     # df_business_names = df_business.select('Business Name').distinct().where(col("Business Name").isNotNull())
@@ -279,9 +297,20 @@ def pre_compute_business():
     return df_park_names_array
 
 
+def pre_compute_location_type():
+    list_location_type = ["airport", "atm", "bank", "bar", "club", "salon", "bookstore", "book", "bus", "bridge",
+                         "store", "church", "building", "department", "office", "doctor", "cleaner", "laundry",
+                         "factory", "supermarket", "station", "gym", "hospital", "jewelry", "pier", "mosque",
+                         "school", "residence", "restaurant", "storage", "facility", "taxi", "transite", "tunnel"]
+    df_location_types_array = spark.createDataFrame(list_location_type, StringType()).select(
+       F.collect_list("value")).withColumnRenamed(
+       "collect_list(value)", "to_match")
+    return df_location_types_array
+
+
 def pre_compute_transformer(df_to_process):
     # lpad and rpad are complete trash and don't take column length, have to make udf, incompetence is high
-    pad_udf = udf(pad_custom)
+    pad_udf = F.udf(pad_custom)
     df_to_process = df_to_process.withColumn('_c0_pad', pad_udf("_c0"))
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
@@ -296,7 +325,7 @@ def pre_compute_transformer(df_to_process):
 
 
 def get_tokens_match_over_diff(df_to_process):
-    df_processed = df_to_process.withColumn("score", size(array_intersect("token_filtered", "to_match"))/size("token_filtered"))
+    df_processed = df_to_process.withColumn("score", F.size(F.array_intersect("token_filtered", "to_match"))/F.size("token_filtered"))
     return df_processed
 
 
@@ -306,26 +335,27 @@ def get_top_n_in_array(df_lookup, top):
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     df_lookup = tokenizer.transform(df_lookup)
     df_lookup = remover.transform(df_lookup)
-    df_lookup = df_lookup.select((explode("token_filtered"))).groupby("col").count().sort('count', ascending=False)
-    df_lookup = df_lookup.filter(length("col") > 2).limit(top).select(
-        collect_list("col")).withColumnRenamed("collect_list(col)", "to_match")
+    df_lookup = df_lookup.select((F.explode("token_filtered"))).groupby("col").count().sort('count', ascending=False)
+    df_lookup = df_lookup.filter(F.length("col") > 2).limit(top).select(
+        F.collect_list("col")).withColumnRenamed("collect_list(col)", "to_match")
     return df_lookup
 
 
 def calc_jaccard_sim(df_to_process, df_match, thresh=.3, padded=True):
     if padded:
         df_processed = df_to_process.join(df_match,
-                           (size(array_intersect(df_to_process.ngrams_pad, df_match.ngrams_pad)) /
-                            size(array_union(df_to_process.ngrams_pad, df_match.ngrams_pad))) > thresh)
+                           (F.size(F.array_intersect(df_to_process.ngrams_pad, df_match.ngrams_pad)) /
+                            F.size(F.array_union(df_to_process.ngrams_pad, df_match.ngrams_pad))) > thresh)
     else:
         df_processed = df_to_process.join(df_match,
-                           (size(array_intersect(df_to_process.ngrams, df_match.ngrams)) /
-                            size(array_union(df_to_process.ngrams, df_match.ngrams))) > thresh)
+                           (F.size(F.array_intersect(df_to_process.ngrams, df_match.ngrams)) /
+                            F.size(F.array_union(df_to_process.ngrams, df_match.ngrams))) > thresh)
     return df_processed
 
 
 def pad_custom(val):
     return "^^{}$$".format(val)
+
 
 if __name__ == "__main__":
     spark = SparkSession \
@@ -341,4 +371,6 @@ if __name__ == "__main__":
     df_pre_car_make.cache()
     df_pre_vehicle_type = pre_compute_vehicle_type()
     df_pre_vehicle_type.cache()
+    df_pre_location_type = pre_compute_location_type()
+    df_pre_location_type.cache()
     main()
