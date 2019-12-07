@@ -118,7 +118,7 @@ def main():
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
     #strategy pattern usually you would have a class then extend and apply, but this will do.
     functions = [count_website, count_vehicle_type, count_car_make, count_parks, count_business, count_building_code,
-                 count_location_type]
+                 count_location_type, count_other]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
@@ -160,8 +160,8 @@ def website_regex(val):
     return re.match(regex, val) is not None
 
 
-# def count_other(df_to_process, file):
-#     return df_to_process.select("id", F.lit("Other").alias("sem_type"), F.lit(file).alias("file")).distinct()
+def count_other(df_to_process):
+    return "Other", df_to_process, df_to_process.select("id", F.lit("Other").alias("sem_type")).distinct()
 
 
 def count_website(df_to_process):
