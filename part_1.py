@@ -17,8 +17,8 @@ def main(start_index, end_index):
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
     # conf = spark.sparkContext._conf.setAll(
-    #     [('spark.executor.memory', '24g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
-    #      ('spark.cores.max', '4'), ('spark.driver.memory', '24g')])
+    #     [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
+    #      ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
     # spark.sparkContext.stop()
     # spark = SparkSession.builder.config(conf=conf).getOrCreate()
     # new_conf = spark.sparkContext._conf.getAll()
@@ -34,19 +34,21 @@ def main(start_index, end_index):
         # could maybe use pathlib library or get it with hdfs
         processed_path = nyc_open_datafile[0]
         df_nod = spark.read.option("header", "true").option("delimiter", "\t").csv(processed_path)
-
-        file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
-        print(file_name)
-        start_process = time.time()
-        bp = BasicProfiling(processed_path, df_nod)
-        table_dict = bp.process()
-        json_type = json.dumps(table_dict)
-        #write to hdfs
-        # spark.parallelize([json_type]).toDF().coalesce(1).write.json('/user/gl758/big_data/job_{}_{}/{}'.format(start_index, end_index, file_name))
-        with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+', encoding="utf-8") as f:
-            f.write(json_type)
-        end_process = time.time()
-        print("total process time {}".format(end_process - start_process))
+        try:
+            file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
+            print(file_name)
+            start_process = time.time()
+            bp = BasicProfiling(processed_path, df_nod)
+            table_dict = bp.process()
+            json_type = json.dumps(table_dict)
+            #write to hdfs
+            # spark.parallelize([json_type]).toDF().coalesce(1).write.json('/user/gl758/big_data/job_{}_{}/{}'.format(start_index, end_index, file_name))
+            with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+', encoding="utf-8") as f:
+                f.write(json_type)
+            end_process = time.time()
+            print("total process time {}".format(end_process - start_process))
+        except Exception as e:
+            print("unable to process because {}".format(e))
 
 
 
