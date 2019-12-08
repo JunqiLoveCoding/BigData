@@ -6,6 +6,7 @@ import os
 from dateutil import parser
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
+import pyspark.sql.functions as F
 import time
 import sys
 
@@ -16,8 +17,8 @@ def main(start_index, end_index):
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
     # conf = spark.sparkContext._conf.setAll(
-    #     [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
-    #      ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
+    #     [('spark.executor.memory', '24g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
+    #      ('spark.cores.max', '4'), ('spark.driver.memory', '24g')])
     # spark.sparkContext.stop()
     # spark = SparkSession.builder.config(conf=conf).getOrCreate()
     # new_conf = spark.sparkContext._conf.getAll()
@@ -33,21 +34,20 @@ def main(start_index, end_index):
         # could maybe use pathlib library or get it with hdfs
         processed_path = nyc_open_datafile[0]
         df_nod = spark.read.option("header", "true").option("delimiter", "\t").csv(processed_path)
-        try:
-            file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
-            print(file_name)
-            start_process = time.time()
-            bp = BasicProfiling(processed_path, df_nod)
-            table_dict = bp.process()
-            json_type = json.dumps(table_dict)
-            #write to hdfs
-            # spark.parallelize([json_type]).toDF().coalesce(1).write.json('/user/gl758/big_data/job_{}_{}/{}'.format(start_index, end_index, file_name))
-            with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+', encoding="utf-8") as f:
-                f.write(json_type)
-            end_process = time.time()
-            print("total process time {}".format(end_process - start_process))
-        except Exception as e:
-            print("unable to process because {}".format(e))
+
+        file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
+        print(file_name)
+        start_process = time.time()
+        bp = BasicProfiling(processed_path, df_nod)
+        table_dict = bp.process()
+        json_type = json.dumps(table_dict)
+        #write to hdfs
+        # spark.parallelize([json_type]).toDF().coalesce(1).write.json('/user/gl758/big_data/job_{}_{}/{}'.format(start_index, end_index, file_name))
+        with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+', encoding="utf-8") as f:
+            f.write(json_type)
+        end_process = time.time()
+        print("total process time {}".format(end_process - start_process))
+
 
 
 # We should put this in it's on package, but submitting with packages is kind of annoying so
@@ -71,10 +71,9 @@ class BasicProfiling:
         self.table_dict['columns'] = []
 
     def __add_column_general_info(self, column, column_name):
-        general_count = column.select(lit(column_name).alias("name"), count(column_name).alias("count"), countDistinct(column_name).alias("distinct"))
-        general_empty = column.filter(col(column_name).isNull()).fillna({column_name: '0'}).select(count(column_name).alias("empty"))
+        general_count = column.agg(lit(column_name).alias("name"), count(when(col(column_name).isNotNull(), True)).alias("count"), countDistinct(col(column_name)).alias("distinct"), count(when(col(column_name).isNull(), True)).alias("count"))
         general_fre = column.groupBy(column_name).agg(count(column_name).alias("count")).orderBy(desc("count")).limit(5).agg(collect_list(column_name).alias('fre'))
-        return general_count, general_empty, general_fre
+        return general_count, general_fre
 
     def _add_datatype_columns(self, column, column_name):
         """
@@ -86,12 +85,12 @@ class BasicProfiling:
         return column
 
     def __get_stats_int(self, column, column_name):
-        int_info = column.filter("dtype = 'INT'").withColumn(column_name, column[column_name].cast('int'))\
-            .select(array(count(column_name), max(column_name), min(column_name), mean(column_name), stddev(column_name)).alias('stats_int'))
+        int_info = column.filter("dtype = 'INT'").withColumn(column_name[1:-1], col(column_name).cast('int'))\
+            .select(array(count(col(column_name)), F.max(col(column_name)), F.min(col(column_name)), mean(col(column_name)), stddev(col(column_name))).alias('stats_int'))
         return int_info
 
     def __get_stats_double(self, column, column_name):
-        double_info = column.filter("dtype = 'REAL'").withColumn(column_name, column[column_name].cast('double')).\
+        double_info = column.filter("dtype = 'REAL'").withColumn(column_name[1:-1], column[column_name].cast('double')).\
             select(array(count(column_name), max(column_name), min(column_name), mean(column_name), stddev(column_name)).alias('stats_double'))
         return double_info
 
@@ -108,7 +107,7 @@ class BasicProfiling:
         longest = df_len.orderBy(desc("len")).limit(5).agg(collect_list(column_name).alias('longest_values')).select('longest_values')
         return text_info, shortest, longest
 
-    def __convert_df_to_dict(self, integer, real, date, text, shortest, longest, count, empty, fre):
+    def __convert_df_to_dict(self, integer, real, date, text, shortest, longest, count, fre):
         stats_int = integer.collect()
         stats_double = real.collect()
         stats_date = date.collect()
@@ -116,13 +115,13 @@ class BasicProfiling:
         stats_shortest = shortest.collect()
         stats_longest = longest.collect()
         general_count = count.collect()
-        general_empty = empty.collect()
+        # general_empty = empty.collect()
         general_fre = fre.collect()
         for i in range(len(stats_int)):
             column_dict = {}
             column_stats = [general_count[i][0], stats_int[i][0], stats_double[i][0], stats_date[i][0], stats_text[i][0], stats_shortest[i][0], stats_longest[i][0]]
             column_dict['column_name'] = column_stats[0]
-            column_dict['number_empty_cells'] = general_empty[i][0]
+            column_dict['number_empty_cells'] = general_count[i][3]
             column_dict['number_non_empty_cells'] = general_count[i][1]
             column_dict['number_distinct_values'] = general_count[i][2]
             column_dict['frequent_values'] = general_fre[i][0]
@@ -217,9 +216,10 @@ class BasicProfiling:
         self.__set_up_dictionary()
 
         for i, column_name in enumerate(self.columns):
+            column_name = "`{}`".format(column_name)
             column = self.df_nod.select(column_name)
 
-            general_count, general_empty, general_fre = self.__add_column_general_info(column, column_name)
+            general_count, general_fre = self.__add_column_general_info(column, column_name)
 
             # # generate type_dict
             column = self._add_datatype_columns(column, column_name)
@@ -240,7 +240,6 @@ class BasicProfiling:
                 table_shortest = shortest
                 table_longest = longest
                 general_table_count = general_count
-                general_table_empty = general_empty
                 general_table_fre = general_fre
             else:
                 stats_table_int = stats_table_int.union(stats_int)
@@ -250,10 +249,9 @@ class BasicProfiling:
                 table_shortest = table_shortest.union(shortest)
                 table_longest = table_longest.union(longest)
                 general_table_count = general_table_count.union(general_count)
-                general_table_empty = general_table_empty.union(general_empty)
                 general_table_fre = general_table_fre.union(general_fre)
 
-        self.__convert_df_to_dict(stats_table_int, stats_table_double, stats_table_date, stats_table_text, table_shortest, table_longest, general_table_count, general_table_empty, general_table_fre)
+        self.__convert_df_to_dict(stats_table_int, stats_table_double, stats_table_date, stats_table_text, table_shortest, table_longest, general_table_count, general_table_fre)
         return self.table_dict
 
 
@@ -261,3 +259,4 @@ if __name__ == "__main__":
     start_index = int(sys.argv[1])
     end_index = int(sys.argv[2])
     main(start_index, end_index)
+
