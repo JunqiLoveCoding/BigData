@@ -6,6 +6,7 @@ import pyspark.sql.functions as F
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, RegexTokenizer, NGram
 from pyspark.sql.types import StringType, StructType, StructField, IntegerType
 import time
+import numpy as np
 
 
 def main():
@@ -116,9 +117,12 @@ def main():
      'myei-c3fa.Neighborhood_1.txt.gz', 'upwt-zvh3.SCHOOL_LEVEL_.txt.gz', 'aiww-p3af.School_Phone_Number.txt.gz',
      'kiv2-tbus.Vehicle_Make.txt.gz', 'weg5-33pj.SCHOOL_LEVEL_.txt.gz',
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
-    #strategy pattern usually you would have a class then extend and apply, but this will do.
-    functions = [count_website, count_vehicle_type, count_car_make, count_parks, count_business, count_building_code,
-                 count_location_type, count_other]
+    # strategy pattern usually you would have a class then extend and apply, but this will do.
+    # functions = [count_website, count_vehicle_type, count_car_make, count_parks, count_business, count_building_code,
+    #              count_location_type, count_school_name, count_color, count_area_study, count_subject, count_city_agency,
+    #              count_city_agency_abbrev, count_school_level, count_college_name, count_other]
+    functions = [count_school_name, count_color, count_area_study, count_subject, count_city_agency,
+                 count_city_agency_abbrev, count_school_level, count_college_name, count_other]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
@@ -126,7 +130,7 @@ def main():
     ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
     ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
     pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
-    for file in db_list[0:3]:
+    for file in db_list:
         processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
         df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
         df_to_process = df_to_process.withColumn("id", F.monotonically_increasing_id())
@@ -143,7 +147,8 @@ def main():
             else:
                 df_full = df_full.union(df_processed)
             print("sem name {}".format(sem_name))
-            # print("sem_name {}, count {}, count left {}".format(sem_name, count, df_to_process.count()))
+            # print("sem_name {}, count {}, count left {}".format(sem_name, df_processed.count(), df_to_process.count()))
+
         df_full.groupBy("sem_type").agg({"id": "count"}).show()
         print("process time {}".format(time.time() - start))
 
@@ -168,7 +173,7 @@ def count_website(df_to_process):
     udf_website_regex = F.udf(website_regex)
     df_to_process2 = df_to_process.withColumn("_c0_trim", F.regexp_replace(F.col("_c0"), "\\s+", ""))
     df_processed = df_to_process2.filter(udf_website_regex(df_to_process2._c0_trim) == True)
-    df_left = df_to_process2.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_to_process2.join(df_processed, ["id", "id"], "left_anti")
     df_left = df_left.drop("_c0_trim")
     return 'Websites', df_left, df_processed.select("id", F.lit('Websites').alias("sem_type")).distinct()
 
@@ -182,7 +187,7 @@ def count_building_code(df_to_process):
     udf_building_code_regex = F.udf(building_code_regex)
     df_to_process2 = df_to_process.withColumn("_c0_trim", F.regexp_replace(F.col("_c0"), "\\s+", ""))
     df_processed = df_to_process2.filter(udf_building_code_regex(df_to_process2._c0_trim) == True)
-    df_left = df_to_process2.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_to_process2.join(df_processed, ["id", "id"], "left_anti")
     df_left = df_left.drop("_c0_trim")
     return 'Building Code', df_left, df_processed.select("id", F.lit('Building Code').alias("sem_type")).distinct()
 
@@ -190,14 +195,14 @@ def count_building_code(df_to_process):
 def count_car_make(df_to_process):
     df_processed = df_to_process.join(df_pre_car_make, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_to_process, df_pre_car_make)
-    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
     return 'Car make', df_left, df_processed.select("id", F.lit('Car make').alias("sem_type")).distinct()
 
 
 def count_vehicle_type(df_to_process):
     # df_processed = df_to_process.join(df_pre_vehicle_type, levenshtein(lower(df_to_process._c0), lower(df_pre_vehicle_type._c0)) < 2)
     df_processed = calc_jaccard_sim(df_to_process, df_pre_vehicle_type)
-    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
     return 'Vehicle Type', df_left, df_processed.select("id", F.lit('Vehicle Type').alias("sem_type")).distinct()
 
 
@@ -205,7 +210,7 @@ def count_parks(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_park)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
     return 'Parks/Playgrounds', df_left, df_processed.select("id", F.lit('Parks/Playgrounds').alias("sem_type")).distinct()
 
 
@@ -213,18 +218,84 @@ def count_business(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_business)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
     return 'Business Name', df_left, df_processed.select("id", F.lit('Business Name').alias("sem_type")).distinct()
+
 
 def count_location_type(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_location_type)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
     return 'Location Type', df_left, df_processed.select("id", F.lit("Location Type").alias("sem_type")).distinct()
 
+
+def count_school_name(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_school_name)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'school_name', df_left, df_processed.select("id", F.lit('school_name').alias("sem_type")).distinct()
+
+
+def count_color(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_color)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'color', df_left, df_processed.select("id", F.lit('color').alias("sem_type")).distinct()
+
+
+def count_city_agency(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_city_agency)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'city_agency', df_left, df_processed.select("id", F.lit('city_agency').alias("sem_type")).distinct()
+
+
+def count_city_agency_abbrev(df_to_process):
+    df_processed = df_to_process.join(df_pre_city_agency_abbrev,
+                                      F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city_agency_abbrev._c0)) < 3)
+    # df_processed = calc_jaccard_sim(df_left, df_pre_city_agency_abbrev)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'city_agency', df_left, df_processed.select("id", F.lit('city_agency').alias("sem_type")).distinct()
+
+
+def count_area_study(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_area_study)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'area_of_study', df_left, df_processed.select("id", F.lit('area_of_study').alias("sem_type")).distinct()
+
+
+def count_subject(df_to_process):
+    # df_processed = df_to_process.join(df_pre_city_agency,
+    #                                   F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
+    df_processed = calc_jaccard_sim(df_to_process, df_pre_subject)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'subject_in_school', df_left, df_processed.select("id", F.lit('subject_in_school').alias("sem_type")).distinct()
+
+
+def count_school_level(df_to_process):
+    df_processed = df_to_process.join(df_pre_school_level,
+                                      F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_school_level._c0)) < 3)
+    # df_processed = calc_jaccard_sim(df_to_process, df_pre_school_level)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'school_level', df_left, df_processed.select("id", F.lit('school_level').alias("sem_type")).distinct()
+
+
+def count_college_name(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_college)
+    df_score = get_tokens_match_over_diff(df_cross_join)
+    df_processed = df_score.filter(df_score.score > .3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "left_anti")
+    return 'college_name', df_left, df_processed.select("id", F.lit('college_name').alias("sem_type")).distinct()
+
+
 def pre_compute_vehicle_type():
-    #https://data.ny.gov/Transportation/Vehicle-Makes-and-Body-Types-Most-Popular-in-New-Y/3pxy-wy2i
+    # https://data.ny.gov/Transportation/Vehicle-Makes-and-Body-Types-Most-Popular-in-New-Y/3pxy-wy2i
     df_vehicle_type = spark.read.option("header", "true").option("delimiter", ",").csv('/user/gl758/hd/vehicle_type.csv')
     df_vehicle_type = df_vehicle_type.select("Body Type").filter(F.col("Body Type") != "????").distinct()
     df_vehicle_type = df_vehicle_type.withColumnRenamed("Body Type", "_c0")
@@ -287,14 +358,14 @@ def pre_compute_business():
                            "first", "metro", "ny,", "associates", "gonzalez,", "farm", "wash", "maria", "sons",
                            "smith,", "maintenance", "care", "big", "furniture", "angel", "quality", "computer", "chen,",
                            "louis", "enterprise", "lopez,", "custom"]
-    df_park_names_array = spark.createDataFrame(list_business_names, StringType()).select(
+    df_business_names_array = spark.createDataFrame(list_business_names, StringType()).select(
         F.collect_list("value")).withColumnRenamed(
         "collect_list(value)", "to_match")
     # df_business = spark.read.option("header", "true").option("delimiter", "\t").csv('/user/hm74/NYCOpenData/w7w3-xahh.tsv.gz')
     # df_business_names = df_business.select('Business Name').distinct().where(col("Business Name").isNotNull())
     # df_business_names = df_business_names.withColumnRenamed('Business Name', "_c0")
     # df_business_names_array = get_top_n_in_array(df_business_names, 200)
-    return df_park_names_array
+    return df_business_names_array
 
 
 def pre_compute_location_type():
@@ -306,6 +377,171 @@ def pre_compute_location_type():
        F.collect_list("value")).withColumnRenamed(
        "collect_list(value)", "to_match")
     return df_location_types_array
+
+
+def pre_compute_school_name():
+    list_school_name = ['gardens', '1', 'leaders', 'prep', 'education', 'school,', '4', 'john', 'park', 'stuyvesant',
+                        'house', 'arts', 'ps', 'at', 'studies', 's', 'science', 'catholic', 'lady', 'my', 'learn',
+                        'scholars', 'college', 'friends', 'crown', 'new', 'early', 'm', 'charles', 'saint', 'ps/is',
+                        '5', 'learning', '&', 'charter', 'richmond', 'future', 'city', 'place', 'side', 'world',
+                        'institute', 'start', 'brooklyn', 'corp', 'bushwick', 'sciences', 'williamsburg', 'nursery',
+                        'childhood', 'board', 'ii', 'south', 'children', "children's", 'william', 'north', 'robert',
+                        'school', 'excellence', 'street', 'bronx', 'bedford', 'life', 'llc', 'r', 'academy', 'urban',
+                        'preparatory', 'little', 'dr', 'mosaic', 'collaborative', 'queens', 'community', 'lutheran',
+                        'educational', 'technology', 'bay', 'j', 'neighborhood', 'services', 'all', 'yeshiva', 'york',
+                        'h', 'edward', '20', 'iii', 'care', 'inc', 'united', 'first', 'i', 'career', 'child',
+                        'american', 'young', 'daycare', 'success', 'island', 'leadership', 'our', '2', 'e', 'of',
+                        'district', 'staten', 'collegiate', 'hill', 'is', 'ps/ms', 'center', 'center,', 'ny', 'church',
+                        'secondary', 'harlem', 'hall', 'day', '3', 'jhs', 'richard', 'washington', 'math', 'head',
+                        'development', 'program', 'public', 'dcc', 'l', 'west', 'a', 'mott', 'assembly', 'f', 'b',
+                        'village', 'international', 'george', 'kids', 'language', 'st', 'heights', 'and', 'east',
+                        'health', 'star', 'family', 'for', 'discovery', 'w', 'technical', 'avenue', 'manhattan',
+                        'the', 'ms', 'ave']
+    df_school_name_array = spark.createDataFrame(list_school_name, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_school_name_array
+
+
+def pre_compute_color():
+    list_color = ['blue-green', 'amethyst', 'cerulean', 'coral', 'pink', 'blush', 'copper', 'scarlet', 'grey', 'mauve',
+                  'raspberry', 'chocolate', 'lilac', 'teal', 'erin', 'yellow', 'burgundy', 'lemon', 'silver', 'amaranth',
+                  'brown', 'lime', 'red-violet', 'orange-red', 'orchid', 'green', 'black', 'pear', 'carmine', 'gold',
+                  'cyan', 'tan', 'violet', 'gray', 'viridian', 'chartreuse', 'ruby', 'red', 'puce', 'byzantium', 'jade',
+                  'azure', 'salmon', 'rose', 'champagne', 'indigo', 'periwinkle', 'crimson', 'sand', 'blue', 'sangria',
+                  'white', 'apricot', 'amber', 'lavender', 'magenta', 'maroon', 'ochre', 'bud', 'emerald', 'purple',
+                  'harlequin', 'sapphire', 'bronze', 'coffee', 'aquamarine', 'ivory', 'peach', 'ultramarine', 'olive',
+                  'orange', 'blue-violet', 'beige', 'plum', 'taupe', 'navy', 'cerise', 'turquoise', 'vg', 'gm', 'ikb',
+                  'cotw', 'ot', 'ncnd', 'blk', 'pkb', 'gg', 'og', 'fir', 'biv', 'sog', 'py', 'pew', 'cpk', 'fbk', 'dbe',
+                  'org', 'burg', 'pk', 'lyw', 'ctb', 'ri', 'fr', 'mi', 'sgd', 'tvs', 'dpe', 'cb', 'cotm', 'wlgb', 'cwp',
+                  'nmm', 'sct', 'uhb', 'whfu', 'owl', 'wyor', 'r', 'fpe', 'opsd', 'bt', 'cym', 'yc', 'is', 'c', 'gr',
+                  'hsb', 'apec', 'lpe', 'phz', 'bvd', 'gsdm', 'ir', 'wdp', 'bew', 'jg', 'lbe', 'loe', 'pw', 'wobk',
+                  'yoy', 'yge', 'cbgr', 'rvn', 'orbk', 'whgn', 'gst', 'pp', 'his', 'nw', 'pf', 'hp', 'blk/wht', 'rct',
+                  'rr', 'red', 'roygbv', 'bk', 'lr', 'prl', 'pr', 'fwe', 'lch', 'lp', 'a', 'sy', 'whhp', 'esg', 'nyg',
+                  'se', 'wr', 'rd', 'hge', 'euv', 'aw', 'bsc', 'yel', 'dtb', 'bbb', 'ygb', 'vsm', 'lgn', 'fgn', 'ge',
+                  'ye', 'ihs', 'ncb', 'mv', 'yw', 'hsv', 'bn', 'syg', 'oe', 'drk', 'hb', 'uca', 'gn', 'pgbk', 'lrd',
+                  'tbs', 'eng', 'wtb', 'wc', 'cad', 'kb', 'hsi', 'lc', 'wocb', 'nir', 'wf', 'lbn', 'vt', 'bkgn', 'ryg',
+                  'yl', 'hsc', 'pg', 'rbc', 'blb', 'cr', 'mci', 'qb', 'wd', 'wg', 'dnl', 'cf', 'wt', 'qc', 'wtgy',
+                  'hpwh', 'cbwh', 'hg', 'ryw', 'bi', 'pnk', 'twr', 'fvt', 'dr', 'ab', 'db', 'dw', 'gbx', 'fppo', 'ww',
+                  'rbz', 'sg', 'ba', 'hr', 'il', 'gry', 'amg', 'frd', 'ls', 'tqb', 'fyw', 'lg', 'ro', 'bkgd', 'royg',
+                  'sw', 'rbt', 'pc', 'sb', 'gl', 'fppb', 'rbg', 'ufo', 'wowb', 'mgm', 'frbs', 'glc', 'ymc', 'roygbiv',
+                  'epns', 'ib', 'ycbcr', 'eb', 'scg', 'gd', 'mb', 'ob', 'ol', 'cmyk', 'wht', 'covc', 'ici', 'dwb',
+                  'wcmy', 'gf', 'wwpk', 'ttlb', 'mr', 'ac', 'fb', 'wbf', 'tg', 'rag', 'wrb', 'sar', 'btb', 'all', 'ec',
+                  'vw', 'hc', 'tcdb', 'wonp', 'ufb', 'm', 'amanda', 'bow', 'navw', 'tp', 'iv', 'pdp', 'bv', 'cag',
+                  'foe', 'ntsc', 'cw', 'mw', 'grow', 'llr', 'doe', 'irb', 'uv', 'sf', 'wor', 'pd', 'bg', 'gs', 'nc',
+                  'rt', 'whke', 'dppl', 'cto', 'cc', 'dm', 'iib', 'wcrw', 'yr', 'rmc', 'wb', 'acmv', 'yi', 'gbb', 'dvt',
+                  'tacky', 'fppl', 'bepu', 'ngc', 'ctrs', 'am', 'bc', 'gy', 'hlbk', 'gt', 'bgr', 'vibgyor', 'cg', 'lb',
+                  'fub', 'bw', 'cst', 'ct', 'dvf', 'vc', 'ggf', 'epc', 'gb', 'tc', 'icc', 'soch', 'cmf', 'wooa', 'rgb',
+                  'ucs', 'bmw', 'ggp', 'h', 'drd', 'dg', 'rtb', 'wob', 'jb', 'rby', 'wog', 'kbc', 'woob', 'rvr', 'lgy',
+                  'g', 'b', 'fbe', 's&p', 'ddpo', 'ssm', 'mm', 'bd', 'bb', 'vs', 'l', 'fgy', 'gnry', 'lw', 'noc', 'msog',
+                  'oyb', 'op', 'lrv', 'vwh', 'nb', 'wyr', 'pe', 'gp', 'rcb', 'dyw', 'o', 'rwab', 'dcm', 'lvt', 'gem',
+                  'bop', 'xb', 'bwc', 'ws', 'we', 'dgn', 'rb', 'ebp', 'biw', 'mg', 'vga', 'v', 'cmy', 'ci', 'fy', 'be',
+                  'ddbg', 'sr', 'hsl', 'pmr', 'wow', 'y', 'fly', 'bob', 'rj', 'fw']
+    df_color_array = spark.createDataFrame(list_color, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_color_array
+
+
+def pre_compute_city_agency():
+    list_city_agency = ['Preservation', 'Planning', 'Commission', 'Civic', 'Appointments', 'Correction', 'Food',
+                        'Census', "Teachers'", 'Fire', 'Information', 'Privacy', 'York', 'Coordination', 'Young',
+                        'Small', 'Aging', 'University', 'Revision', 'Relations', 'Protection', 'Center', 'to',
+                        'Corporation', 'Civilian', 'Department', 'Sales', 'Of', 'TSASC', 'Hudson', 'Labor',
+                        'Entertainment', "Children's", 'Reform', 'City', '2005', 'Police', 'NYC', 'Comptroller',
+                        'NYPD', 'Operations', 'Brooklyn', 'Authority', 'Loft', 'Hospitals', 'Standards', 'Analytics',
+                        'Director', 'Construction', 'Corruption', 'Marshals', 'Coordinator', 'Payroll', 'Homeless',
+                        'Consumer', 'Appeals', 'Combat', 'Cultural', 'Domestic', "Mayor's", 'Retirement', 'Workforce',
+                        'Inspector', 'Human', 'District', 'Clerk', 'Records', '-', 'Inc.', 'Public', 'Hygiene',
+                        'Advance', 'Mental', 'of', "Veterans'", 'Business', 'Water', 'Opportunity', 'Projects',
+                        'Education', 'Rent', 'Practices', 'Commissioner', 'County', 'ThriveNYC', 'Bronx',
+                        'International', 'Trials', 'Fiscal', 'Resources', 'General', 'Women-Owned', 'Asset',
+                        'Municipal', 'with', 'Parks', 'Social', 'Recovery', 'Violence', 'Event', 'Sanitation',
+                        'Richmond', 'Men’s', 'Guidelines', 'Yards', 'Review', 'Transportation', 'Equal', 'Equity',
+                        'Criminal', 'Remediation', 'Economic', "Employees'", 'Council', 'Services', 'Boards', 'Health',
+                        'Justice', 'Kings', '&', 'Infrastructure', 'Board', 'Library', 'Transitional', 'Design',
+                        'Innovation', 'Company', 'Affairs', 'Strategic', 'Probation', 'Enforcement', 'Intelligence',
+                        'Cabinet', 'Worker', 'Office', 'and', 'Immigrant', 'Enterprises', 'Medical', 'Budget', 'Gender',
+                        'Securitization', 'Rights', 'School', 'Resiliency', 'Command', 'through', 'Examiner', 'Law',
+                        'Unit', 'Narcotics', 'Initiative', 'Property', 'Committee', 'Development', 'Community',
+                        'Tribunal', 'Media', 'Hearings', 'Prosecutor', 'Charter', 'Investigation', 'Limousine', 'Chief',
+                        'Landmarks', 'Policy', 'on', 'Procurement', 'Management', 'GreeNYC', 'Tax', 'End', 'Fund',
+                        'Special', 'Interest', 'Youth', 'Cyber', 'Queens', 'Technology', 'Attorney', 'Administration',
+                        'Gender-Based', 'Conflicts', 'Buildings', 'System', 'Campaign', 'for', 'agencies', 'Civil',
+                        'Judiciary', 'Disabilities', 'Intergovernmental', 'Elections', 'Finance', 'Sustainability',
+                        'Partnerships', 'Engagement', 'Advisory', 'Taxi', 'Independent', 'Actuary', 'Integrity',
+                        'Administrator', '+', 'Programs', 'the', 'Climate', 'Administrative', 'Recreation', 'Data',
+                        'Housing', 'Advocate', 'Year', 'Officer', 'Citywide', 'Environmental', 'Pension', 'Mayor’s',
+                        'Events', 'Minority', 'New', 'Emergency', 'Employment', 'Receivable', 'Contract',
+                        'Telecommunications', 'Service', 'Complaint', 'People']
+    df_city_agency_array = spark.createDataFrame(list_city_agency, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    df_city_agency_abbrev = spark.read.option("header", "true").option("delimiter", ",").csv('/user/zw1923/city_agency_abbrev.csv')
+    df_city_agency_abbrev = df_city_agency_abbrev.withColumnRenamed("abbrev", "_c0")
+    # df_city_agency_abbrev = pre_compute_transformer(df_city_agency_abbrev)
+    return df_city_agency_array, df_city_agency_abbrev
+
+
+def pre_compute_area_of_study():
+    list_area_study = ['mathematics', 'formal', 'natural', 'literature', 'social', 'applied', 'history', 'archaeology',
+                       'chemistry', 'health', 'law', 'medicine', 'and', 'sciences', 'engineering', 'technology',
+                       'economics', 'earth', 'political', 'science', 'geography', 'anthropology', 'computer',
+                       'psychology', 'sociology', 'biology', 'languages', 'theology', 'work', 'humanities', 'human',
+                       'business', 'philosophy', 'space', 'performing', 'visual', 'arts', 'statistics', 'physics']
+    df_area_study_array = spark.createDataFrame(list_area_study, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_area_study_array
+
+
+def pre_compute_subject():
+    df_subject = spark.read.option("header", "true").option("delimiter", ",").csv('/user/zw1923/subjects.csv')
+    df_subject = df_subject.withColumn("_c0", F.lower(df_subject.subjects)).drop("subjects")
+    df_subject = pre_compute_transformer(df_subject)
+    return df_subject
+
+
+def pre_compute_school_level():
+    df_school_level = spark.read.option("header", "true").option("delimiter", ",").csv('/user/zw1923/school_levels.csv')
+    df_school_level = df_school_level.withColumn("_c0", F.lower(df_school_level.levels))
+    # df_school_level = pre_compute_transformer(df_school_level)
+    return df_school_level
+
+
+def pre_compute_college_name():
+    list_college_name = ['state', 'resources', 'nursing', 'arts', 'seminary', 'art', 'boricua', 'harry', 'union',
+                         'tisch', 'plaza', 'university', 'conservatory', 'macaulay', 'wood', 'berkeley', 'mcallister',
+                         'mannes', 'community', 'technical', 'labor', 'aeronautics', 'asa', 'juilliard', 'museum',
+                         'institute', 'rockefeller', 'frank', 'bard', 'jay', 'hebrew', 'cuny', 'bramson', 'phillips',
+                         'monroe', 'research', 'hospital', 'cardozo', 'the', 'mandl', 'wagner', 'beth', 'architecture',
+                         'bronx', 'study', 'brunswick', 'of', 'parsons', 'design', 'isaac', '&', 'e.', 'maritime',
+                         'general', 'sinai', 'gallatin', 'pratt', 'america', 'cornell', 'school', 'marymount', 'icahn',
+                         'economics', 'vaughn', 'brooklyn', 'for', 'science', 'staten', 'studio', 'theological',
+                         'arsdale', 'dramatic', 'hofstra', 'ort', 'flushing', 'affairs', 'visual', 'nyack', 'israel',
+                         'european', 'jazz', 'gilder', 'justice', 'and', 'law', 'social', 'natural', 'gerstner', 'new',
+                         'briarcliffe', 'keller', 'metropolitan', 'american', 'massage', 'individualized', 'saint',
+                         'tech', 'borough', 'n.', 'fordham', 'city', 'cooper', 'francis', 'benjamin', 'laboratory',
+                         'sloan', 'ballet', 'tobe-coburn', 'college', 'sciences', 'swedish', 'hunter', 'rabbi', 'lang',
+                         'van', 'business', 'contemporary', 'st.', 'engineering', 'nyc', 'music', 'pace', 'criminal',
+                         'island', 'international', 'einstein', 'globalization', 'technology', 'career', 'psychoanalysis',
+                         'interior', 'mercy', 'manhattan', 'kingsborough', 'policy', 'professional', 'oriental', 'touro',
+                         'tri-state', 'guttman', 'vincent', 'teachers', 'york', 'ministry', "john's", 'mount', 'downstate',
+                         'street', 'queens', 'lehman', 'allied', 'william', 'empire', 'ailey', 'bethel', 'fashion',
+                         'medicine', 'urban', 'biomedical', 'polytechnic', 'medgar', 'richard', 'g.', 'helene', 'eugene',
+                         'jewish', "joseph's", 'devry', 'fuld', "sotheby's", 'therapy', 'rochelle', 'evers', 'east',
+                         'graduate', 'health', 'studies', 'jr.', 'education', 'medical', 'john', 'optometry', 'crew',
+                         'kettering', 'environment', 'maestro', 'columbia', 'milano', 'public', 'elchanon', 'journalism',
+                         'alvin', 'zarb', 'film', 'suny', 'pacific', 'center', 'musical', 'yeshiva', 'bank',
+                         'merchandising', 'management', 'queensborough', '-', 'at', 'academy', 'program', 'honors',
+                         'globe', 'history', 'long', 'barnard', 'liberal', 'acupuncture', 'hostos', 'laguardia', 'dance',
+                         'albert', "king's", 'drama', 'weill', "christie's", 'baruch', 'cuny', 'liu', 'nyu', 'suny',
+                         'aada', 'amda', 'fit', 'lim', 'nyaa', 'nyfa', 'nyit', 'nyss', 'sva', 'nyls', 'nymc', 'ats',
+                         'gts', 'jts', 'nyts', 'uts', 'nyif', 'ort']
+    df_college_name_array = spark.createDataFrame(list_college_name, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_college_name_array
 
 
 def pre_compute_transformer(df_to_process):
@@ -365,12 +601,39 @@ if __name__ == "__main__":
         .getOrCreate()
     df_pre_park = pre_compute_park()
     df_pre_park = df_pre_park.cache()
+
     df_pre_business = pre_compute_business()
     df_pre_business = df_pre_business.cache()
+
     df_pre_car_make = pre_compute_car_make()
     df_pre_car_make.cache()
+
     df_pre_vehicle_type = pre_compute_vehicle_type()
     df_pre_vehicle_type.cache()
+
     df_pre_location_type = pre_compute_location_type()
     df_pre_location_type.cache()
+
+    df_pre_school_name = pre_compute_school_name()
+    df_pre_school_name = df_pre_school_name.cache()
+
+    df_pre_color = pre_compute_color()
+    df_pre_color = df_pre_color.cache()
+
+    df_pre_city_agency, df_pre_city_agency_abbrev = pre_compute_city_agency()
+    df_pre_city_agency = df_pre_city_agency.cache()
+    df_pre_city_agency_abbrev = df_pre_city_agency_abbrev.cache()
+
+    df_pre_area_study = pre_compute_area_of_study()
+    df_pre_area_study = df_pre_area_study.cache()
+
+    df_pre_subject = pre_compute_subject()
+    df_pre_subject = df_pre_subject.cache()
+
+    df_pre_school_level = pre_compute_school_level()
+    df_pre_school_level = df_pre_school_level.cache()
+
+    df_pre_college = pre_compute_college_name()
+    df_pre_college = df_pre_college.cache()
+
     main()
