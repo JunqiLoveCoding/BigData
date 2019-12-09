@@ -121,8 +121,10 @@ def main():
     # functions = [count_website, count_vehicle_type, count_car_make, count_parks, count_business, count_building_code,
     #              count_location_type, count_school_name, count_color, count_area_study, count_subject, count_city_agency,
     #              count_city_agency_abbrev, count_school_level, count_college_name, count_other]
-    functions = [count_school_name, count_color, count_area_study, count_subject, count_city_agency,
-                 count_city_agency_abbrev, count_school_level, count_college_name, count_other]
+    functions = [count_zip_code, count_phone_number, count_lat_lon, count_borough,count_address_street_name,
+                 count_school_name, count_color, count_area_study, count_subject, count_city_agency,
+                 count_city_agency_abbrev, count_school_level, count_college_name, count_city,
+                 count_neighborhood, count_person_name,count_other]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
@@ -152,6 +154,112 @@ def main():
         df_full.groupBy("sem_type").agg({"id": "count"}).show()
         print("process time {}".format(time.time() - start))
 
+def lat_lon_regex(val):
+    regex = re.compile(r"^\s*[(]([0-9]|[1-8][0-9]|90)[.][0-9]+,\s-*([0-9]|[1-9][0-9]|1[0-7][0-9]|180)[.][0-9]+[)]\s*$")
+    return re.match(regex, val) is not None
+
+def phone_number_regex(val):
+    regex = re.compile(r"^\s*[0-9]{10}\s*$|"
+                       r"^\s*([0-9]{3}|[0-9]{4}|[(][0-9]{3}[)]|[0-9](-*|\s*)[0-9]{3})(-*|\s*)[0-9]{3}(-*|\s*)[0-9]{4}\s*$")
+    return re.match(regex, val) is not None
+
+def zip_code_regex(val):
+    regex = re.compile(r"^\s*[0-9]{5}\s*$|"
+                       r"^\s*[0-9]{9}\s*$|"
+                       r"^\s*[0-9]{5}-[0-9]{4}\s*$")
+    return re.match(regex, val) is not None
+
+def address_regex(val):
+    regex = re.compile(r"^(-|[0-9])+\s")
+    if re.match(regex, val) is not None:
+        return "address"
+    else:
+        return "street_name"
+
+def person_name_regex(val):
+    s = val.replace(" ", "")
+    s = s.strip(".")
+    regex = re.compile(r"^[a-zA-Z][a-zA-Z]+$")
+    return re.match(regex, s) is not None
+
+def pre_compute_city():
+    df_city = spark.read.format("csv").load("/user/jz3350/ny_cities.csv")
+    df_city = df_city.withColumnRenamed("City", "_c0")
+    return df_city
+
+def count_city(df_to_process):
+    df_processed = df_to_process.join(df_pre_city, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city._c0)) < 3)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'city', df_left, df_processed.select("id", F.lit('city').alias("sem_type")).distinct()
+
+def count_lat_lon(df_to_process):
+    udf_lat_lon_regex = F.udf(lat_lon_regex)
+    df_processed = df_to_process.filter(udf_lat_lon_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'lat_lon_cord', df_left, df_processed.select("id", F.lit('lat_lon_cord').alias("sem_type"))
+
+def count_phone_number(df_to_process):
+    udf_phone_number_regex = F.udf(phone_number_regex)
+    df_processed = df_to_process.filter(udf_phone_number_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'phone_number', df_left, df_processed.select("id", F.lit('phone_number').alias("sem_type"))
+
+def count_zip_code(df_to_process):
+    udf_zip_code_regex = F.udf(zip_code_regex)
+    df_processed = df_to_process.filter(udf_zip_code_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'zip_code', df_left, df_processed.select("id", F.lit('zip_code').alias("sem_type"))
+
+def count_borough(df_to_process):
+    borough_list = ['BRONX', 'BROOKLYN', 'MANHATTAN', 'QUEENS', 'STATEN ISLAND', 'K', 'M', 'Q', 'R', 'X']
+    df_borough = spark.createDataFrame(borough_list, StringType())
+    df_to_processd = df_to_process.withColumn("upper", F.upper(df_to_process._c0))
+    df_join = df_to_processd.join(df_borough, df_to_processd.upper == df_borough.value, "outer")
+    df_left = df_join.filter(df_borough.value.isNull()).drop("upper").drop("value")
+    return 'borough', df_left, df_join.filter(df_borough.value.isNotNull()).select("id", F.lit('borough').alias("sem_type"))
+
+def pre_compute_street():
+    list_street = ["street", "avenue", "road", "parkway", "broadway", "plaza", "court", "place",
+                   "boulevard", "terrace", "highway", "st", "drive", "concourse", "ave" ,
+                   "lane", "walk", "way", "rd", "square", "center", "pl", "blvd",
+                   "terr", "ct", "dr", "beach", "avenu", "aven", "boule", "boulev", "bouleva", "boul",
+                   "sq", "slip", "pkway"]
+    df_street_types = spark.createDataFrame(list_street, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_street_types
+
+def count_address_street_name(df_to_process):
+    udf_address_regex = F.udf(address_regex)
+    df_cross_join = df_to_process.crossJoin(df_pre_street)
+    df_processed = df_cross_join.withColumn("size", F.size(F.array_intersect("token_filtered", "to_match")))
+    df_street = df_processed.filter(df_processed.size != 0).withColumn("sem_type", udf_address_regex(df_processed._c0))
+    df_left = df_processed.filter(df_processed.size == 0).drop("to_match").drop("size")
+    return "address_street_name", df_left, df_street.select("id", "sem_type")
+
+def pre_compute_neighborhood():
+    list_neighborhood = ["center", "village", "central", "bay", "west", "east", "north", "south",
+                         "upper", "lower", "side", "town", "cbd", "hill", "heights", "soho", "valley"
+                         , "acres", "ridge", "harbor", "beach", "island", "club",
+                         "ferry", "mall", "oaks", "point", "hts", "neck", "yard", "basin"
+                         "slope", "hook"]
+    df_neighborhood_types = spark.createDataFrame(list_neighborhood, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_neighborhood_types
+
+def count_neighborhood(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_neighborhood)
+    df_processed = df_cross_join.withColumn("size", F.size(F.array_intersect("token_filtered", "to_match")))
+    df_street = df_processed.filter(df_processed.size != 0).withColumn("sem_type", F.lit('neighborhood'))
+    df_left = df_processed.filter(df_processed.size == 0).drop("to_match").drop("size")
+    return "neighborhood", df_left, df_street.select("id", "sem_type")
+
+def count_person_name(df_to_process):
+    udf_person_name_regex = F.udf(person_name_regex)
+    df_processed = df_to_process.filter(udf_person_name_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id", "id"], "leftanti")
+    return 'person_name', df_left, df_processed.select("id", F.lit('person_name').alias("sem_type"))
 
 def website_regex(val):
     # https://stackoverflow.com/questions/7160737/python-how-to-validate-a-url-in-python-malformed-or-not
@@ -635,5 +743,14 @@ if __name__ == "__main__":
 
     df_pre_college = pre_compute_college_name()
     df_pre_college = df_pre_college.cache()
+
+    df_pre_city = pre_compute_city()
+    df_pre_city = df_pre_city.cache()
+
+    df_pre_street = pre_compute_street()
+    df_pre_street = df_pre_street.cache()
+
+    df_pre_neighborhood = pre_compute_neighborhood()
+    df_pre_neighborhood = df_pre_neighborhood.cache()
 
     main()
