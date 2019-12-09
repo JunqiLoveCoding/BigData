@@ -117,6 +117,7 @@ def main():
      'kiv2-tbus.Vehicle_Make.txt.gz', 'weg5-33pj.SCHOOL_LEVEL_.txt.gz',
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
     #strategy pattern usually you would have a class then extend and apply, but this will do.
+    db_list = ['4pt5-3vv4.Location.txt.gz']
     functions = [count_website, count_vehicle_type, count_car_make, count_parks, count_business, count_building_code,
                  count_location_type, count_other]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
@@ -138,13 +139,14 @@ def main():
         for i, function in enumerate(functions):
             print("processing file {} function {}".format(file, function))
             sem_name, df_to_process, df_processed = function(df_to_process)
-            if i == 0:
-                df_full = df_processed
-            else:
-                df_full = df_full.union(df_processed)
+            # if i == 0:
+            #     df_full = df_processed
+            # else:
+            #     df_full = df_full.union(df_processed)
+            df_processed.show()
             print("sem name {}".format(sem_name))
             # print("sem_name {}, count {}, count left {}".format(sem_name, count, df_to_process.count()))
-        df_full.groupBy("sem_type").agg({"id": "count"}).show()
+        # df_full.groupBy("sem_type").agg({"id": "count"}).show()
         print("process time {}".format(time.time() - start))
 
 
