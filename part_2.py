@@ -118,9 +118,11 @@ def main():
      'kiv2-tbus.Vehicle_Make.txt.gz', 'weg5-33pj.SCHOOL_LEVEL_.txt.gz',
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
     # strategy pattern usually you would have a class then extend and apply, but this will do.
-    functions = [count_website, count_vehicle_type, count_car_make, count_parks, count_business, count_building_code,
-                 count_location_type, count_school_name, count_color, count_area_study, count_subject, count_city_agency,
-                 count_city_agency_abbrev, count_school_level, count_college_name,  count_other]
+    functions = [count_website, count_zip_code, count_phone_number, count_lat_lon, count_borough, count_vehicle_type,
+                 count_car_make, count_building_code, count_location_type, count_city_agency_abbrev, count_city_agency,
+                 count_color, count_subject, count_area_study, count_school_level, count_address_street_name,
+                 count_school_name, count_college_name, count_parks, count_business, count_neighborhood,
+                 count_person_name, count_other]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
@@ -128,7 +130,7 @@ def main():
     ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
     ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
     pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
-    for file in db_list:
+    for file in db_list[1:]:
         processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
         df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
         df_to_process = df_to_process.withColumn("id", F.monotonically_increasing_id())
@@ -137,18 +139,22 @@ def main():
         for stage in pipeline:
             df_to_process = stage.transform(df_to_process)
         start = time.time()
-
         for i, function in enumerate(functions):
             print("processing file {} function {}".format(file, function))
             sem_name, df_to_process, df_processed = function(df_to_process)
-            if (i == 8) or (i == 16):
+            if i == 8:
                 # oh look another thing nyu hpc infra can't do properly, looks like they didn't set up localcheckpointing.
                 # when doing itarative operations, i.e. applying functions to check rows, on joins you get degredation.
                 # One way to solve it is localcheckpointing, it will disguard the history of the transformation.
                 # df_to_process.rdd.localCheckpoint()
                 print("writing in and out")
-                df_to_process.write.mode("overwrite").parquet("process.parquet")
-                df_to_process = spark.read.parquet("process.parquet")
+                df_to_process.write.mode("overwrite").parquet("process_{}.parquet".format(i))
+                df_to_process = spark.read.parquet("process_{}.parquet".format(i))
+                print("finished writing in")
+            if i == 16:
+                print("writing in and out")
+                df_to_process.write.mode("overwrite").parquet("process_{}.parquet".format(i))
+                df_to_process = spark.read.parquet("process_{}.parquet".format(i))
                 print("finished writing in")
             if i == 0:
                 df_full = df_processed
@@ -159,7 +165,125 @@ def main():
 
         df_complete = df_full.groupBy("sem_type").agg({"id": "count"})
         df_complete.show()
+        print("process time {}".format(time.time()-start))
 
+
+def lat_lon_regex(val):
+    regex = re.compile(r"^\s*[(]([0-9]|[1-8][0-9]|90)[.][0-9]+,\s-*([0-9]|[1-9][0-9]|1[0-7][0-9]|180)[.][0-9]+[)]\s*$")
+    return re.match(regex, val) is not None
+
+
+def phone_number_regex(val):
+    regex = re.compile(r"^\s*[0-9]{10}\s*$|"
+                       r"^\s*([0-9]{3}|[0-9]{4}|[(][0-9]{3}[)]|[0-9](-*|\s*)[0-9]{3})(-*|\s*)[0-9]{3}(-*|\s*)[0-9]{4}\s*$")
+    return re.match(regex, val) is not None
+
+
+def zip_code_regex(val):
+    regex = re.compile(r"^\s*[0-9]{5}\s*$|"
+                       r"^\s*[0-9]{9}\s*$|"
+                       r"^\s*[0-9]{5}-[0-9]{4}\s*$")
+    return re.match(regex, val) is not None
+
+
+def address_regex(val):
+    regex = re.compile(r"^(-|[0-9])+\s")
+    if re.match(regex, val) is not None:
+        return "address"
+    else:
+        return "street_name"
+
+
+def person_name_regex(val):
+    s = val.replace(" ", "")
+    s = s.strip(".")
+    regex = re.compile(r"^[a-zA-Z][a-zA-Z]+$")
+    return re.match(regex, s) is not None
+
+
+def pre_compute_city():
+    df_city = spark.read.format("csv").load("/user/jz3350/ny_cities.csv")
+    df_city = df_city.withColumnRenamed("City", "_c0")
+    return df_city
+
+
+def count_city(df_to_process):
+    df_processed = df_to_process.join(df_pre_city, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city._c0)) < 3)
+    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
+    return 'city', df_left, df_processed.select("id", F.lit('city').alias("sem_type")).distinct()
+
+
+def count_lat_lon(df_to_process):
+    udf_lat_lon_regex = F.udf(lat_lon_regex)
+    df_processed = df_to_process.filter(udf_lat_lon_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
+    return 'lat_lon_cord', df_left, df_processed.select("id", F.lit('lat_lon_cord').alias("sem_type"))
+
+
+def count_phone_number(df_to_process):
+    udf_phone_number_regex = F.udf(phone_number_regex)
+    df_processed = df_to_process.filter(udf_phone_number_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
+    return 'phone_number', df_left, df_processed.select("id", F.lit('phone_number').alias("sem_type"))
+
+
+def count_zip_code(df_to_process):
+    udf_zip_code_regex = F.udf(zip_code_regex)
+    df_processed = df_to_process.filter(udf_zip_code_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
+    return 'zip_code', df_left, df_processed.select("id", F.lit('zip_code').alias("sem_type"))
+
+
+def count_borough(df_to_process):
+    borough_list = ['BRONX', 'BROOKLYN', 'MANHATTAN', 'QUEENS', 'STATEN ISLAND', 'K', 'M', 'Q', 'R', 'X']
+    df_borough = spark.createDataFrame(borough_list, StringType())
+    df_to_processd = df_to_process.withColumn("upper", F.upper(df_to_process._c0))
+    df_join = df_to_processd.join(df_borough, df_to_processd.upper == df_borough.value, "outer")
+    df_left = df_join.filter(df_borough.value.isNull()).drop("upper").drop("value")
+    return 'borough', df_left, df_join.filter(df_borough.value.isNotNull()).select("id", F.lit('borough').alias("sem_type"))
+
+def pre_compute_street():
+    list_street = ["street", "avenue", "road", "parkway", "broadway", "plaza", "court", "place",
+                   "boulevard", "terrace", "highway", "st", "drive", "concourse", "ave" ,
+                   "lane", "walk", "way", "rd", "square", "center", "pl", "blvd",
+                   "terr", "ct", "dr", "beach", "avenu", "aven", "boule", "boulev", "bouleva", "boul",
+                   "sq", "slip", "pkway"]
+    df_street_types = spark.createDataFrame(list_street, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_street_types
+
+def count_address_street_name(df_to_process):
+    udf_address_regex = F.udf(address_regex)
+    df_cross_join = df_to_process.crossJoin(df_pre_street)
+    df_processed = df_cross_join.withColumn("size", F.size(F.array_intersect("token_filtered", "to_match")))
+    df_street = df_processed.filter(df_processed.size != 0).withColumn("sem_type", udf_address_regex(df_processed._c0))
+    df_left = df_processed.filter(df_processed.size == 0).drop("to_match").drop("size")
+    return "address_street_name", df_left, df_street.select("id", "sem_type")
+
+def pre_compute_neighborhood():
+    list_neighborhood = ["center", "village", "central", "bay", "west", "east", "north", "south",
+                         "upper", "lower", "side", "town", "cbd", "hill", "heights", "soho", "valley"
+                         , "acres", "ridge", "harbor", "beach", "island", "club",
+                         "ferry", "mall", "oaks", "point", "hts", "neck", "yard", "basin"
+                         "slope", "hook"]
+    df_neighborhood_types = spark.createDataFrame(list_neighborhood, StringType()).select(
+        F.collect_list("value")).withColumnRenamed(
+        "collect_list(value)", "to_match")
+    return df_neighborhood_types
+
+def count_neighborhood(df_to_process):
+    df_cross_join = df_to_process.crossJoin(df_pre_neighborhood)
+    df_processed = df_cross_join.withColumn("size", F.size(F.array_intersect("token_filtered", "to_match")))
+    df_street = df_processed.filter(df_processed.size != 0).withColumn("sem_type", F.lit('neighborhood'))
+    df_left = df_processed.filter(df_processed.size == 0).drop("to_match").drop("size")
+    return "neighborhood", df_left, df_street.select("id", "sem_type")
+
+def count_person_name(df_to_process):
+    udf_person_name_regex = F.udf(person_name_regex)
+    df_processed = df_to_process.filter(udf_person_name_regex(df_to_process._c0) == True)
+    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
+    return 'person_name', df_left, df_processed.select("id", F.lit('person_name').alias("sem_type"))
 
 def website_regex(val):
     # https://stackoverflow.com/questions/7160737/python-how-to-validate-a-url-in-python-malformed-or-not
@@ -247,24 +371,23 @@ def count_school_name(df_to_process):
 
 
 def count_color(df_to_process):
-    df_cross_join = df_to_process.crossJoin(df_pre_color)
-    df_score = get_tokens_match_over_diff(df_cross_join)
-    df_processed = df_score.filter(df_score.score > .3)
+    df_processed = df_to_process.join(df_pre_color,
+                                      F.levenshtein(F.lower(df_to_process._c0),
+                                                    F.lower(df_pre_color._c0)) < 3)
+    # df_processed = calc_jaccard_sim(df_left, df_pre_city_agency_abbrev)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
     return 'color', df_left, df_processed.select("id", F.lit('color').alias("sem_type")).distinct()
 
 
 def count_city_agency(df_to_process):
-    df_cross_join = df_to_process.crossJoin(df_pre_city_agency)
-    df_score = get_tokens_match_over_diff(df_cross_join)
-    df_processed = df_score.filter(df_score.score > .3)
+    df_processed = calc_jaccard_sim(df_to_process, df_pre_city_agency)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
     return 'city_agency', df_left, df_processed.select("id", F.lit('city_agency').alias("sem_type")).distinct()
 
 
 def count_city_agency_abbrev(df_to_process):
     df_processed = df_to_process.join(df_pre_city_agency_abbrev,
-                                      F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city_agency_abbrev._c0)) < 3)
+                                      F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city_agency_abbrev._c0)) < 1)
     # df_processed = calc_jaccard_sim(df_left, df_pre_city_agency_abbrev)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
     return 'city_agency', df_left, df_processed.select("id", F.lit('city_agency').alias("sem_type")).distinct()
@@ -412,88 +535,25 @@ def pre_compute_school_name():
 
 
 def pre_compute_color():
-    list_color = ['blue-green', 'amethyst', 'cerulean', 'coral', 'pink', 'blush', 'copper', 'scarlet', 'grey', 'mauve',
-                  'raspberry', 'chocolate', 'lilac', 'teal', 'erin', 'yellow', 'burgundy', 'lemon', 'silver', 'amaranth',
-                  'brown', 'lime', 'red-violet', 'orange-red', 'orchid', 'green', 'black', 'pear', 'carmine', 'gold',
-                  'cyan', 'tan', 'violet', 'gray', 'viridian', 'chartreuse', 'ruby', 'red', 'puce', 'byzantium', 'jade',
-                  'azure', 'salmon', 'rose', 'champagne', 'indigo', 'periwinkle', 'crimson', 'sand', 'blue', 'sangria',
-                  'white', 'apricot', 'amber', 'lavender', 'magenta', 'maroon', 'ochre', 'bud', 'emerald', 'purple',
-                  'harlequin', 'sapphire', 'bronze', 'coffee', 'aquamarine', 'ivory', 'peach', 'ultramarine', 'olive',
-                  'orange', 'blue-violet', 'beige', 'plum', 'taupe', 'navy', 'cerise', 'turquoise', 'vg', 'gm', 'ikb',
-                  'cotw', 'ot', 'ncnd', 'blk', 'pkb', 'gg', 'og', 'fir', 'biv', 'sog', 'py', 'pew', 'cpk', 'fbk', 'dbe',
-                  'org', 'burg', 'pk', 'lyw', 'ctb', 'ri', 'fr', 'mi', 'sgd', 'tvs', 'dpe', 'cb', 'cotm', 'wlgb', 'cwp',
-                  'nmm', 'sct', 'uhb', 'whfu', 'owl', 'wyor', 'r', 'fpe', 'opsd', 'bt', 'cym', 'yc', 'is', 'c', 'gr',
-                  'hsb', 'apec', 'lpe', 'phz', 'bvd', 'gsdm', 'ir', 'wdp', 'bew', 'jg', 'lbe', 'loe', 'pw', 'wobk',
-                  'yoy', 'yge', 'cbgr', 'rvn', 'orbk', 'whgn', 'gst', 'pp', 'his', 'nw', 'pf', 'hp', 'blk/wht', 'rct',
-                  'rr', 'red', 'roygbv', 'bk', 'lr', 'prl', 'pr', 'fwe', 'lch', 'lp', 'a', 'sy', 'whhp', 'esg', 'nyg',
-                  'se', 'wr', 'rd', 'hge', 'euv', 'aw', 'bsc', 'yel', 'dtb', 'bbb', 'ygb', 'vsm', 'lgn', 'fgn', 'ge',
-                  'ye', 'ihs', 'ncb', 'mv', 'yw', 'hsv', 'bn', 'syg', 'oe', 'drk', 'hb', 'uca', 'gn', 'pgbk', 'lrd',
-                  'tbs', 'eng', 'wtb', 'wc', 'cad', 'kb', 'hsi', 'lc', 'wocb', 'nir', 'wf', 'lbn', 'vt', 'bkgn', 'ryg',
-                  'yl', 'hsc', 'pg', 'rbc', 'blb', 'cr', 'mci', 'qb', 'wd', 'wg', 'dnl', 'cf', 'wt', 'qc', 'wtgy',
-                  'hpwh', 'cbwh', 'hg', 'ryw', 'bi', 'pnk', 'twr', 'fvt', 'dr', 'ab', 'db', 'dw', 'gbx', 'fppo', 'ww',
-                  'rbz', 'sg', 'ba', 'hr', 'il', 'gry', 'amg', 'frd', 'ls', 'tqb', 'fyw', 'lg', 'ro', 'bkgd', 'royg',
-                  'sw', 'rbt', 'pc', 'sb', 'gl', 'fppb', 'rbg', 'ufo', 'wowb', 'mgm', 'frbs', 'glc', 'ymc', 'roygbiv',
-                  'epns', 'ib', 'ycbcr', 'eb', 'scg', 'gd', 'mb', 'ob', 'ol', 'cmyk', 'wht', 'covc', 'ici', 'dwb',
-                  'wcmy', 'gf', 'wwpk', 'ttlb', 'mr', 'ac', 'fb', 'wbf', 'tg', 'rag', 'wrb', 'sar', 'btb', 'all', 'ec',
-                  'vw', 'hc', 'tcdb', 'wonp', 'ufb', 'm', 'amanda', 'bow', 'navw', 'tp', 'iv', 'pdp', 'bv', 'cag',
-                  'foe', 'ntsc', 'cw', 'mw', 'grow', 'llr', 'doe', 'irb', 'uv', 'sf', 'wor', 'pd', 'bg', 'gs', 'nc',
-                  'rt', 'whke', 'dppl', 'cto', 'cc', 'dm', 'iib', 'wcrw', 'yr', 'rmc', 'wb', 'acmv', 'yi', 'gbb', 'dvt',
-                  'tacky', 'fppl', 'bepu', 'ngc', 'ctrs', 'am', 'bc', 'gy', 'hlbk', 'gt', 'bgr', 'vibgyor', 'cg', 'lb',
-                  'fub', 'bw', 'cst', 'ct', 'dvf', 'vc', 'ggf', 'epc', 'gb', 'tc', 'icc', 'soch', 'cmf', 'wooa', 'rgb',
-                  'ucs', 'bmw', 'ggp', 'h', 'drd', 'dg', 'rtb', 'wob', 'jb', 'rby', 'wog', 'kbc', 'woob', 'rvr', 'lgy',
-                  'g', 'b', 'fbe', 's&p', 'ddpo', 'ssm', 'mm', 'bd', 'bb', 'vs', 'l', 'fgy', 'gnry', 'lw', 'noc', 'msog',
-                  'oyb', 'op', 'lrv', 'vwh', 'nb', 'wyr', 'pe', 'gp', 'rcb', 'dyw', 'o', 'rwab', 'dcm', 'lvt', 'gem',
-                  'bop', 'xb', 'bwc', 'ws', 'we', 'dgn', 'rb', 'ebp', 'biw', 'mg', 'vga', 'v', 'cmy', 'ci', 'fy', 'be',
-                  'ddbg', 'sr', 'hsl', 'pmr', 'wow', 'y', 'fly', 'bob', 'rj', 'fw']
-    df_color_array = spark.createDataFrame(list_color, StringType()).select(
-        F.collect_list("value")).withColumnRenamed(
-        "collect_list(value)", "to_match")
-    return df_color_array
+    df_color = spark.read.option("header", "true").option("delimiter", ",").csv('/user/zw1923/colors.csv')
+    df_color = df_color.withColumnRenamed("colors", "_c0")
+    df_color = pre_compute_transformer(df_color)
+    return df_color
 
 
 def pre_compute_city_agency():
-    list_city_agency = ['Preservation', 'Planning', 'Commission', 'Civic', 'Appointments', 'Correction', 'Food',
-                        'Census', "Teachers'", 'Fire', 'Information', 'Privacy', 'York', 'Coordination', 'Young',
-                        'Small', 'Aging', 'University', 'Revision', 'Relations', 'Protection', 'Center', 'to',
-                        'Corporation', 'Civilian', 'Department', 'Sales', 'Of', 'TSASC', 'Hudson', 'Labor',
-                        'Entertainment', "Children's", 'Reform', 'City', '2005', 'Police', 'NYC', 'Comptroller',
-                        'NYPD', 'Operations', 'Brooklyn', 'Authority', 'Loft', 'Hospitals', 'Standards', 'Analytics',
-                        'Director', 'Construction', 'Corruption', 'Marshals', 'Coordinator', 'Payroll', 'Homeless',
-                        'Consumer', 'Appeals', 'Combat', 'Cultural', 'Domestic', "Mayor's", 'Retirement', 'Workforce',
-                        'Inspector', 'Human', 'District', 'Clerk', 'Records', '-', 'Inc.', 'Public', 'Hygiene',
-                        'Advance', 'Mental', 'of', "Veterans'", 'Business', 'Water', 'Opportunity', 'Projects',
-                        'Education', 'Rent', 'Practices', 'Commissioner', 'County', 'ThriveNYC', 'Bronx',
-                        'International', 'Trials', 'Fiscal', 'Resources', 'General', 'Women-Owned', 'Asset',
-                        'Municipal', 'with', 'Parks', 'Social', 'Recovery', 'Violence', 'Event', 'Sanitation',
-                        'Richmond', 'Men’s', 'Guidelines', 'Yards', 'Review', 'Transportation', 'Equal', 'Equity',
-                        'Criminal', 'Remediation', 'Economic', "Employees'", 'Council', 'Services', 'Boards', 'Health',
-                        'Justice', 'Kings', '&', 'Infrastructure', 'Board', 'Library', 'Transitional', 'Design',
-                        'Innovation', 'Company', 'Affairs', 'Strategic', 'Probation', 'Enforcement', 'Intelligence',
-                        'Cabinet', 'Worker', 'Office', 'and', 'Immigrant', 'Enterprises', 'Medical', 'Budget', 'Gender',
-                        'Securitization', 'Rights', 'School', 'Resiliency', 'Command', 'through', 'Examiner', 'Law',
-                        'Unit', 'Narcotics', 'Initiative', 'Property', 'Committee', 'Development', 'Community',
-                        'Tribunal', 'Media', 'Hearings', 'Prosecutor', 'Charter', 'Investigation', 'Limousine', 'Chief',
-                        'Landmarks', 'Policy', 'on', 'Procurement', 'Management', 'GreeNYC', 'Tax', 'End', 'Fund',
-                        'Special', 'Interest', 'Youth', 'Cyber', 'Queens', 'Technology', 'Attorney', 'Administration',
-                        'Gender-Based', 'Conflicts', 'Buildings', 'System', 'Campaign', 'for', 'agencies', 'Civil',
-                        'Judiciary', 'Disabilities', 'Intergovernmental', 'Elections', 'Finance', 'Sustainability',
-                        'Partnerships', 'Engagement', 'Advisory', 'Taxi', 'Independent', 'Actuary', 'Integrity',
-                        'Administrator', '+', 'Programs', 'the', 'Climate', 'Administrative', 'Recreation', 'Data',
-                        'Housing', 'Advocate', 'Year', 'Officer', 'Citywide', 'Environmental', 'Pension', 'Mayor’s',
-                        'Events', 'Minority', 'New', 'Emergency', 'Employment', 'Receivable', 'Contract',
-                        'Telecommunications', 'Service', 'Complaint', 'People']
-    df_city_agency_array = spark.createDataFrame(list_city_agency, StringType()).select(
-        F.collect_list("value")).withColumnRenamed(
-        "collect_list(value)", "to_match")
+    df_city_agency = spark.read.option("header", "true").option("delimiter", ",").csv('/user/zw1923/city_agency.csv')
+    df_city_agency = df_city_agency.withColumnRenamed("full", "_c0")
+    df_city_agency = pre_compute_transformer(df_city_agency)
     df_city_agency_abbrev = spark.read.option("header", "true").option("delimiter", ",").csv('/user/zw1923/city_agency_abbrev.csv')
     df_city_agency_abbrev = df_city_agency_abbrev.withColumnRenamed("abbrev", "_c0")
     # df_city_agency_abbrev = pre_compute_transformer(df_city_agency_abbrev)
-    return df_city_agency_array, df_city_agency_abbrev
+    return df_city_agency, df_city_agency_abbrev
 
 
 def pre_compute_area_of_study():
-    list_area_study = ['mathematics', 'formal', 'natural', 'literature', 'social', 'applied', 'history', 'archaeology',
-                       'chemistry', 'health', 'law', 'medicine', 'and', 'sciences', 'engineering', 'technology',
+    list_area_study = ['mathematics', 'formal', 'natural', 'literature', 'social', 'applied', 'history',
+                       'chemistry', 'health', 'law', 'medicine', 'sciences', 'engineering', 'technology', 'archaeology',
                        'economics', 'earth', 'political', 'science', 'geography', 'anthropology', 'computer',
                        'psychology', 'sociology', 'biology', 'languages', 'theology', 'work', 'humanities', 'human',
                        'business', 'philosophy', 'space', 'performing', 'visual', 'arts', 'statistics', 'physics']
@@ -541,7 +601,7 @@ def pre_compute_college_name():
                          'graduate', 'health', 'studies', 'jr.', 'education', 'medical', 'john', 'optometry', 'crew',
                          'kettering', 'environment', 'maestro', 'columbia', 'milano', 'public', 'elchanon', 'journalism',
                          'alvin', 'zarb', 'film', 'suny', 'pacific', 'center', 'musical', 'yeshiva', 'bank',
-                         'merchandising', 'management', 'queensborough', '-', 'at', 'academy', 'program', 'honors',
+                         'merchandising', 'management', 'queensborough', 'at', 'academy', 'program', 'honors',
                          'globe', 'history', 'long', 'barnard', 'liberal', 'acupuncture', 'hostos', 'laguardia', 'dance',
                          'albert', "king's", 'drama', 'weill', "christie's", 'baruch', 'cuny', 'liu', 'nyu', 'suny',
                          'aada', 'amda', 'fit', 'lim', 'nyaa', 'nyfa', 'nyit', 'nyss', 'sva', 'nyls', 'nymc', 'ats',
@@ -650,5 +710,14 @@ if __name__ == "__main__":
 
     df_pre_college = pre_compute_college_name()
     df_pre_college = df_pre_college.cache()
+
+    df_pre_city = pre_compute_city()
+    df_pre_city = df_pre_city.cache()
+
+    df_pre_street = pre_compute_street()
+    df_pre_street = df_pre_street.cache()
+
+    df_pre_neighborhood = pre_compute_neighborhood()
+    df_pre_neighborhood = df_pre_neighborhood.cache()
 
     main()
