@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import subprocess
 
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
@@ -117,6 +118,20 @@ def main():
      'myei-c3fa.Neighborhood_1.txt.gz', 'upwt-zvh3.SCHOOL_LEVEL_.txt.gz', 'aiww-p3af.School_Phone_Number.txt.gz',
      'kiv2-tbus.Vehicle_Make.txt.gz', 'weg5-33pj.SCHOOL_LEVEL_.txt.gz',
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
+
+    # sort files according to size
+    directory = os.path.join(os.sep, "user", "hm74", "NYCColumns")
+    file_paths = os.path.join(directory, db_list[0])
+    for file in db_list[1:]:
+        location = os.path.join(directory, file)
+        file_paths = file_paths + ' ' + location
+
+    cmd = 'hadoop fs -du -s ' + file_paths
+    file_sizes = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+    pairs = [(int(x.split()[0]), x.split()[-1]) for x in file_sizes]
+    pairs.sort(key=lambda s: s[0])
+    db_list_sorted = [s[1][22:] for s in pairs]
+
     # strategy pattern usually you would have a class then extend and apply, but this will do.
     functions = [count_website, count_zip_code, count_phone_number, count_lat_lon, count_borough, count_vehicle_type,
                  count_car_make, count_building_code, count_location_type, count_city_agency_abbrev, count_city_agency,
@@ -130,7 +145,7 @@ def main():
     ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
     ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
     pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
-    for file in db_list:
+    for file in db_list_sorted:
         if os.path.exists("task2_json/{}.json".format(file)):
             print('{} is already processed'.format(file))
             continue
@@ -175,7 +190,7 @@ def main():
 
 def convert_df_to_dict(file, df):
     list_info = df.collect()
-    print(list_info)
+    # print(list_info)
     column_dict = {}
     column_dict['column_name'] = file
     column_dict['semantic_types'] = []
@@ -184,7 +199,7 @@ def convert_df_to_dict(file, df):
         type_dict['semantic_type'] = list_info[i][0]
         type_dict['count'] = int(list_info[i][1])
         column_dict['semantic_types'].append(type_dict)
-    print(column_dict)
+    # print(column_dict)
     return column_dict
 
 
@@ -332,7 +347,7 @@ def count_website(df_to_process):
     udf_website_regex = F.udf(website_regex)
     df_to_process2 = df_to_process.withColumn("_c0_trim", F.regexp_replace(F.col("_c0"), "\\s+", ""))
     df_processed = df_to_process2.filter(udf_website_regex(df_to_process2._c0_trim) == True)
-    df_left = df_to_process2.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process2.filter(F.col("id").isin(df_processed["id"]))
     df_left = df_left.drop("_c0_trim")
     return 'Websites', df_left, df_processed.select(F.sum("_c1"), F.lit('Websites').alias("sem_type"))
 
@@ -346,7 +361,7 @@ def count_building_code(df_to_process):
     udf_building_code_regex = F.udf(building_code_regex)
     df_to_process2 = df_to_process.withColumn("_c0_trim", F.regexp_replace(F.col("_c0"), "\\s+", ""))
     df_processed = df_to_process2.filter(udf_building_code_regex(df_to_process2._c0_trim) == True)
-    df_left = df_to_process2.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process2.filter(F.col("id").isin(df_processed["id"]))
     df_left = df_left.drop("_c0_trim")
     return 'Building Code', df_left, df_processed.select(F.sum("_c1"), F.lit('Building Code').alias("sem_type"))
 
@@ -354,14 +369,14 @@ def count_building_code(df_to_process):
 def count_car_make(df_to_process):
     df_processed = df_to_process.join(df_pre_car_make, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_to_process, df_pre_car_make)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'Car make', df_left, df_processed.select(F.sum("_c1"), F.lit('Car make').alias("sem_type"))
 
 
 def count_vehicle_type(df_to_process):
     # df_processed = df_to_process.join(df_pre_vehicle_type, levenshtein(lower(df_to_process._c0), lower(df_pre_vehicle_type._c0)) < 2)
     df_processed = calc_jaccard_sim(df_to_process, df_pre_vehicle_type)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'Vehicle Type', df_left, df_processed.select(F.sum("_c1"), F.lit('Vehicle Type').alias("sem_type"))
 
 
@@ -369,7 +384,7 @@ def count_parks(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_park)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'Parks/Playgrounds', df_left, df_processed.select(F.sum("_c1"), F.lit('Parks/Playgrounds').alias("sem_type"))
 
 
@@ -377,7 +392,7 @@ def count_business(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_business)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'Business Name', df_left, df_processed.select(F.sum("_c1"), F.lit('Business Name').alias("sem_type"))
 
 
@@ -385,7 +400,7 @@ def count_location_type(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_location_type)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'Location Type', df_left, df_processed.select(F.sum("_c1"), F.lit("Location Type").alias("sem_type"))
 
 
@@ -393,7 +408,7 @@ def count_school_name(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_school_name)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'school_name', df_left, df_processed.select(F.sum("_c1"), F.lit('school_name').alias("sem_type"))
 
 
@@ -402,13 +417,13 @@ def count_color(df_to_process):
                                       F.levenshtein(F.lower(df_to_process._c0),
                                                     F.lower(df_pre_color._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_left, df_pre_city_agency_abbrev)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'color', df_left, df_processed.select(F.sum("_c1"), F.lit('color').alias("sem_type"))
 
 
 def count_city_agency(df_to_process):
     df_processed = calc_jaccard_sim(df_to_process, df_pre_city_agency)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'city_agency', df_left, df_processed.select(F.sum("_c1"), F.lit('city_agency').alias("sem_type"))
 
 
@@ -416,7 +431,7 @@ def count_city_agency_abbrev(df_to_process):
     df_processed = df_to_process.join(df_pre_city_agency_abbrev,
                                       F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city_agency_abbrev._c0)) < 1)
     # df_processed = calc_jaccard_sim(df_left, df_pre_city_agency_abbrev)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'city_agency', df_left, df_processed.select(F.sum("_c1"), F.lit('city_agency').alias("sem_type"))
 
 
@@ -424,7 +439,7 @@ def count_area_study(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_area_study)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'area_of_study', df_left, df_processed.select(F.sum("_c1"), F.lit('area_of_study').alias("sem_type"))
 
 
@@ -432,7 +447,7 @@ def count_subject(df_to_process):
     # df_processed = df_to_process.join(df_pre_city_agency,
     #                                   F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
     df_processed = calc_jaccard_sim(df_to_process, df_pre_subject)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'subject_in_school', df_left, df_processed.select(F.sum("_c1"), F.lit('subject_in_school').alias("sem_type"))
 
 
@@ -440,7 +455,7 @@ def count_school_level(df_to_process):
     df_processed = df_to_process.join(df_pre_school_level,
                                       F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_school_level._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_to_process, df_pre_school_level)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'school_level', df_left, df_processed.select(F.sum("_c1"), F.lit('school_level').alias("sem_type"))
 
 
@@ -448,7 +463,7 @@ def count_college_name(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_college)
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
-    df_left = df_to_process.join(df_processed, ["id"], "left_anti")
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
     return 'college_name', df_left, df_processed.select(F.sum("_c1"), F.lit('college_name').alias("sem_type"))
 
 
@@ -694,13 +709,13 @@ if __name__ == "__main__":
         .appName("big_data_proj_part2") \
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
-    # conf = spark.sparkContext._conf.setAll(
-    #     [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
-    #      ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
-    # spark.sparkContext.stop()
-    # spark = SparkSession.builder.config(conf=conf).getOrCreate()
-    # new_conf = spark.sparkContext._conf.getAll()
-    # print(new_conf)
+    conf = spark.sparkContext._conf.setAll(
+        [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
+         ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
+    spark.sparkContext.stop()
+    spark = SparkSession.builder.config(conf=conf).getOrCreate()
+    new_conf = spark.sparkContext._conf.getAll()
+    print(new_conf)
     df_pre_park = pre_compute_park()
     df_pre_park = df_pre_park.cache()
 
