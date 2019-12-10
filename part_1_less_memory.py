@@ -36,23 +36,29 @@ def main(start_index, end_index):
         processed_path = nyc_open_datafile[0]
         df_nod = spark.read.option("header", "true").option("delimiter", "\t").csv(processed_path)
         file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
-        print(file_name)
-        start_process = time.time()
-        table_dict = make(df_nod, file_name)
-        json_type = json.dumps(table_dict)
-        with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+', encoding="utf-8") as f:
-            f.write(json_type)
-        end_process = time.time()
-        print("total process time {}".format(end_process - start_process))
-
+        try:
+            print(file_name)
+            start_process = time.time()
+            table_dict = make(df_nod, file_name)
+            json_type = json.dumps(table_dict)
+            with open("job_{}_{}/{}.json".format(start_index, end_index, file_name), 'w+', encoding="utf-8") as f:
+                f.write(json_type)
+            end_process = time.time()
+            print("total process time {}".format(end_process - start_process))
+        except Exception as e:
+            print("unable to process because {}".format(e))
 
 def make(df_to_process, file_name):
     columns = df_to_process.columns
+    column_count = len(columns)
     get_int_udf = F.udf(get_int, IntegerType())
     get_real_udf = F.udf(get_real, FloatType())
     get_datetime_udf = F.udf(get_datetime)
     get_text_udf = F.udf(get_text)
     agg_list = []
+    general_fre = []
+    longest = []
+    shortest = []
     for i, column in enumerate(columns):
         # df_to_process = df_to_process.withColumn("int_{}".format(column), get_real_udf(column))
         int_name = '{}_int'.format(column)
@@ -85,26 +91,42 @@ def make(df_to_process, file_name):
                     F.stddev(F.col(int_name)).alias("int_std_{}".format(column)),
                     F.stddev(F.col(real_name)).alias("real_std_{}".format(column)),
                     ])
-        if i == 0:
-            general_fre = df_to_process.groupBy(column).agg(F.count(F.col(column)).alias("_c_count")).orderBy(F.col("_c_count"), ascending=False).limit(5).agg(F.collect_list(column).alias('fre'))
-            shortest = df_to_process.filter(F.col(text_name).isNotNull()).orderBy(F.col(len_name), ascending=True).limit(5).agg(F.collect_list(column).alias('shortest_values')).select('shortest_values')
-            longest = df_to_process.orderBy(F.col(len_name), ascending=False).limit(5).agg(F.collect_list(column).alias('longest_values')).select('longest_values')
+        if column_count < 8:
+            if i == 0:
+                general_fre = df_to_process.groupBy(column).agg(F.count(F.col(column)).alias("_c_count")).orderBy(F.col("_c_count"), ascending=False).limit(5).agg(F.collect_list(column).alias('fre'))
+                shortest = df_to_process.filter(F.col(text_name).isNotNull()).orderBy(F.col(len_name), ascending=True).limit(5).agg(F.collect_list(column).alias('shortest_values')).select('shortest_values')
+                longest = df_to_process.orderBy(F.col(len_name), ascending=False).limit(5).agg(F.collect_list(column).alias('longest_values')).select('longest_values')
+            else:
+                general_fre = general_fre.union(df_to_process.groupBy(column).agg(F.count(F.col(column)).alias("_c_count")).orderBy(F.col("_c_count"), ascending=False).limit(5).agg(F.collect_list(column).alias('fre')))
+                shortest = shortest.union(df_to_process.filter(F.col(text_name).isNotNull()).orderBy(F.col(len_name), ascending=True).limit(5).agg(F.collect_list(column).alias('shortest_values')).select('shortest_values'))
+                longest = longest.union(df_to_process.filter(F.col(text_name).isNotNull()).orderBy(F.col(len_name), ascending=False).limit(5).agg(F.collect_list(column).alias('longest_values')).select('longest_values'))
         else:
-            general_fre = general_fre.union(df_to_process.groupBy(column).agg(F.count(F.col(column)).alias("_c_count")).orderBy(F.col("_c_count"), ascending=False).limit(5).agg(F.collect_list(column).alias('fre')))
-            shortest = shortest.union(df_to_process.filter(F.col(text_name).isNotNull()).orderBy(F.col(len_name), ascending=True).limit(5).agg(F.collect_list(column).alias('shortest_values')).select('shortest_values'))
-            longest = longest.union(df_to_process.filter(F.col(text_name).isNotNull()).orderBy(F.col(len_name), ascending=False).limit(5).agg(F.collect_list(column).alias('longest_values')).select('longest_values'))
+            general_fre.append(df_to_process.groupBy(column).agg(F.count(F.col(column)).alias("_c_count")).orderBy(F.col("_c_count"), ascending=False).limit(5).agg(F.collect_list(column).alias('fre')).collect())
+            shortest.append(df_to_process.filter(F.col(text_name).isNotNull()).orderBy(F.col(len_name), ascending=True).limit(5).agg(F.collect_list(column).alias('shortest_values')).select('shortest_values').collect())
+            longest.append(df_to_process.orderBy(F.col(len_name), ascending=False).limit(5).agg(F.collect_list(column).alias('longest_values')).select('longest_values').collect())
+            print("column {} of {}".format(i, column_count))
     df_all_agg = df_to_process.agg(*agg_list)
-
-    table_dict = convert_df_to_dict(columns, df_all_agg, longest, shortest, general_fre, file_name)
+    all_agg = df_all_agg.collect()
+    if not isinstance(general_fre, list):
+        general_fre = general_fre.collect()
+        shortest = shortest.collect()
+        longest = longest.collect()
+    else:
+        print(general_fre)
+        print(shortest)
+        print(longest)
+        general_fre = [[x[0]['fre']] for x in general_fre]
+        shortest = [[x[0]['shortest_values']] for x in shortest]
+        longest = [[x[0]['longest_values']] for x in longest]
+    table_dict = convert_df_to_dict(columns, all_agg, longest, shortest, general_fre, file_name)
     return table_dict
 
 
 def convert_df_to_dict(columns, all_agg, longest, shortest, fre, file_name):
-    all_agg = all_agg.collect()
-    stats_shortest = shortest.collect()
-    stats_longest = longest.collect()
-    general_fre = fre.collect()
     all_agg = all_agg[0]
+    stats_shortest = shortest
+    stats_longest = longest
+    general_fre = fre
     table_dict = dict()
     table_dict['dataset_name'] = file_name
     table_dict['columns'] = []
@@ -113,7 +135,7 @@ def convert_df_to_dict(columns, all_agg, longest, shortest, fre, file_name):
         gen_count = "count_{}".format(column)
         gen_count_null = "count_null_{}".format(column)
         gen_dist_count = "dist_count_{}".format(column)
-        int_count = "int_count_{}".format(column);'[/.'
+        int_count = "int_count_{}".format(column)
         real_count = "real_count_{}".format(column)
         date_count = "date_count_{}".format(column)
         text_count = "text_count_{}".format(column)
