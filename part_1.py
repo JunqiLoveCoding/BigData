@@ -73,8 +73,8 @@ class BasicProfiling:
         self.table_dict['columns'] = []
 
     def __add_column_general_info(self, column, column_name):
-        general_count = column.agg(lit(column_name).alias("name"), count(when(col(column_name).isNotNull(), True)).alias("count"), countDistinct(col(column_name)).alias("distinct"), count(when(col(column_name).isNull(), True)).alias("count"))
-        general_fre = column.groupBy(column_name).agg(count(column_name).alias("count")).orderBy(desc("count")).limit(5).agg(collect_list(column_name).alias('fre'))
+        general_count = column.agg(lit(column_name).alias("name"), count(when(col(column_name).isNotNull(), True)).alias("count_not_null"), countDistinct(col(column_name)).alias("distinct"), count(when(col(column_name).isNull(), True)).alias("count_null"))
+        general_fre = column.groupBy(column_name).agg(count(column_name).alias("count_col")).orderBy(desc("count_col")).limit(5).agg(collect_list(column_name).alias('fre'))
         return general_count, general_fre
 
     def _add_datatype_columns(self, column, column_name):
@@ -157,8 +157,8 @@ class BasicProfiling:
                 type_dict = {}
                 type_dict['type'] = "TEXT"
                 type_dict['count'] = column_stats[4][0]
-                type_dict['shortest_value'] = column_stats[5][0]
-                type_dict['longest_value'] = column_stats[6][0]
+                type_dict['shortest_value'] = column_stats[5]
+                type_dict['longest_value'] = column_stats[6]
                 type_dict['average_length'] = column_stats[4][1]
                 column_dict['data_type'].append(type_dict)
             self.table_dict['columns'].append(column_dict)
