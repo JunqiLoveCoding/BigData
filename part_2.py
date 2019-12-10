@@ -1,12 +1,12 @@
 import os
 import re
+import json
 
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.ml.feature import Tokenizer, StopWordsRemover, RegexTokenizer, NGram
 from pyspark.sql.types import StringType, StructType, StructField, IntegerType
 import time
-import numpy as np
 
 
 def main():
@@ -130,7 +130,10 @@ def main():
     ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
     ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
     pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
-    for file in db_list[1:]:
+    for file in db_list:
+        if os.path.exists("task2_json/{}.json".format(file)):
+            print('{} is already processed'.format(file))
+            continue
         processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
         df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
         df_to_process = df_to_process.withColumn("id", F.monotonically_increasing_id())
@@ -163,9 +166,26 @@ def main():
             print("sem name {}".format(sem_name))
             # print("sem_name {}, count {}, count left {}".format(sem_name, df_processed.count(), df_to_process.count()))
 
-        df_complete = df_full.groupBy("sem_type").agg({"id": "count"})
-        df_complete.show()
+        df_complete = df_full.dropna().groupBy("sem_type").agg({"sum(_c1)": "sum"})
+        json_type = json.dumps(convert_df_to_dict(file, df_complete))
+        with open("task2_json/{}.json".format(file), 'w+', encoding="utf-8") as f:
+            f.write(json_type)
         print("process time {}".format(time.time()-start))
+
+
+def convert_df_to_dict(file, df):
+    list_info = df.collect()
+    print(list_info)
+    column_dict = {}
+    column_dict['column_name'] = file
+    column_dict['semantic_types'] = []
+    for i in range(len(list_info)):
+        type_dict = {}
+        type_dict['semantic_type'] = list_info[i][0]
+        type_dict['count'] = int(list_info[i][1])
+        column_dict['semantic_types'].append(type_dict)
+    print(column_dict)
+    return column_dict
 
 
 def lat_lon_regex(val):
@@ -209,29 +229,29 @@ def pre_compute_city():
 
 def count_city(df_to_process):
     df_processed = df_to_process.join(df_pre_city, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city._c0)) < 3)
-    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
-    return 'city', df_left, df_processed.select("id", F.lit('city').alias("sem_type")).distinct()
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
+    return 'city', df_left, df_processed.select(F.sum("_c1"), F.lit('city').alias("sem_type"))
 
 
 def count_lat_lon(df_to_process):
     udf_lat_lon_regex = F.udf(lat_lon_regex)
     df_processed = df_to_process.filter(udf_lat_lon_regex(df_to_process._c0) == True)
-    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
-    return 'lat_lon_cord', df_left, df_processed.select("id", F.lit('lat_lon_cord').alias("sem_type"))
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
+    return 'lat_lon_cord', df_left, df_processed.select(F.sum("_c1"), F.lit('lat_lon_cord').alias("sem_type"))
 
 
 def count_phone_number(df_to_process):
     udf_phone_number_regex = F.udf(phone_number_regex)
     df_processed = df_to_process.filter(udf_phone_number_regex(df_to_process._c0) == True)
-    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
-    return 'phone_number', df_left, df_processed.select("id", F.lit('phone_number').alias("sem_type"))
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
+    return 'phone_number', df_left, df_processed.select(F.sum("_c1"), F.lit('phone_number').alias("sem_type"))
 
 
 def count_zip_code(df_to_process):
     udf_zip_code_regex = F.udf(zip_code_regex)
     df_processed = df_to_process.filter(udf_zip_code_regex(df_to_process._c0) == True)
-    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
-    return 'zip_code', df_left, df_processed.select("id", F.lit('zip_code').alias("sem_type"))
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
+    return 'zip_code', df_left, df_processed.select(F.sum("_c1"), F.lit('zip_code').alias("sem_type"))
 
 
 def count_borough(df_to_process):
@@ -239,8 +259,10 @@ def count_borough(df_to_process):
     df_borough = spark.createDataFrame(borough_list, StringType())
     df_to_processd = df_to_process.withColumn("upper", F.upper(df_to_process._c0))
     df_join = df_to_processd.join(df_borough, df_to_processd.upper == df_borough.value, "outer")
+    df_processed = df_join.filter(df_borough.value.isNotNull())
     df_left = df_join.filter(df_borough.value.isNull()).drop("upper").drop("value")
-    return 'borough', df_left, df_join.filter(df_borough.value.isNotNull()).select("id", F.lit('borough').alias("sem_type"))
+    return 'borough', df_left, df_processed.select(F.sum("_c1"), F.lit('borough').alias("sem_type"))
+
 
 def pre_compute_street():
     list_street = ["street", "avenue", "road", "parkway", "broadway", "plaza", "court", "place",
@@ -253,13 +275,15 @@ def pre_compute_street():
         "collect_list(value)", "to_match")
     return df_street_types
 
+
 def count_address_street_name(df_to_process):
     udf_address_regex = F.udf(address_regex)
     df_cross_join = df_to_process.crossJoin(df_pre_street)
     df_processed = df_cross_join.withColumn("size", F.size(F.array_intersect("token_filtered", "to_match")))
-    df_street = df_processed.filter(df_processed.size != 0).withColumn("sem_type", udf_address_regex(df_processed._c0))
+    df_street = df_processed.filter(df_processed.size != 0).withColumn("sem_type", F.lit(udf_address_regex(df_processed._c0)))
     df_left = df_processed.filter(df_processed.size == 0).drop("to_match").drop("size")
-    return "address_street_name", df_left, df_street.select("id", "sem_type")
+    return "address_street_name", df_left, df_street.groupBy('sem_type').agg({'_c1': 'sum'}).select('sum(_c1)', 'sem_type')
+
 
 def pre_compute_neighborhood():
     list_neighborhood = ["center", "village", "central", "bay", "west", "east", "north", "south",
@@ -272,18 +296,21 @@ def pre_compute_neighborhood():
         "collect_list(value)", "to_match")
     return df_neighborhood_types
 
+
 def count_neighborhood(df_to_process):
     df_cross_join = df_to_process.crossJoin(df_pre_neighborhood)
     df_processed = df_cross_join.withColumn("size", F.size(F.array_intersect("token_filtered", "to_match")))
-    df_street = df_processed.filter(df_processed.size != 0).withColumn("sem_type", F.lit('neighborhood'))
+    df_street = df_processed.filter(df_processed.size != 0)
     df_left = df_processed.filter(df_processed.size == 0).drop("to_match").drop("size")
-    return "neighborhood", df_left, df_street.select("id", "sem_type")
+    return "neighborhood", df_left, df_street.select(F.sum("_c1"), F.lit('neighborhood').alias("sem_type"))
+
 
 def count_person_name(df_to_process):
     udf_person_name_regex = F.udf(person_name_regex)
     df_processed = df_to_process.filter(udf_person_name_regex(df_to_process._c0) == True)
-    df_left = df_to_process.join(df_processed, ["id"], "leftanti")
-    return 'person_name', df_left, df_processed.select("id", F.lit('person_name').alias("sem_type"))
+    df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
+    return 'person_name', df_left, df_processed.select(F.sum("_c1"), F.lit('person_name').alias("sem_type"))
+
 
 def website_regex(val):
     # https://stackoverflow.com/questions/7160737/python-how-to-validate-a-url-in-python-malformed-or-not
@@ -298,7 +325,7 @@ def website_regex(val):
 
 
 def count_other(df_to_process):
-    return "Other", df_to_process, df_to_process.select("id", F.lit("Other").alias("sem_type")).distinct()
+    return "Other", df_to_process, df_to_process.select(F.sum("_c1"), F.lit("Other").alias("sem_type"))
 
 
 def count_website(df_to_process):
@@ -307,7 +334,7 @@ def count_website(df_to_process):
     df_processed = df_to_process2.filter(udf_website_regex(df_to_process2._c0_trim) == True)
     df_left = df_to_process2.join(df_processed, ["id"], "left_anti")
     df_left = df_left.drop("_c0_trim")
-    return 'Websites', df_left, df_processed.select("id", F.lit('Websites').alias("sem_type")).distinct()
+    return 'Websites', df_left, df_processed.select(F.sum("_c1"), F.lit('Websites').alias("sem_type"))
 
 
 def building_code_regex(val):
@@ -321,21 +348,21 @@ def count_building_code(df_to_process):
     df_processed = df_to_process2.filter(udf_building_code_regex(df_to_process2._c0_trim) == True)
     df_left = df_to_process2.join(df_processed, ["id"], "left_anti")
     df_left = df_left.drop("_c0_trim")
-    return 'Building Code', df_left, df_processed.select("id", F.lit('Building Code').alias("sem_type")).distinct()
+    return 'Building Code', df_left, df_processed.select(F.sum("_c1"), F.lit('Building Code').alias("sem_type"))
 
 
 def count_car_make(df_to_process):
     df_processed = df_to_process.join(df_pre_car_make, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_to_process, df_pre_car_make)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'Car make', df_left, df_processed.select("id", F.lit('Car make').alias("sem_type")).distinct()
+    return 'Car make', df_left, df_processed.select(F.sum("_c1"), F.lit('Car make').alias("sem_type"))
 
 
 def count_vehicle_type(df_to_process):
     # df_processed = df_to_process.join(df_pre_vehicle_type, levenshtein(lower(df_to_process._c0), lower(df_pre_vehicle_type._c0)) < 2)
     df_processed = calc_jaccard_sim(df_to_process, df_pre_vehicle_type)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'Vehicle Type', df_left, df_processed.select("id", F.lit('Vehicle Type').alias("sem_type")).distinct()
+    return 'Vehicle Type', df_left, df_processed.select(F.sum("_c1"), F.lit('Vehicle Type').alias("sem_type"))
 
 
 def count_parks(df_to_process):
@@ -343,7 +370,7 @@ def count_parks(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'Parks/Playgrounds', df_left, df_processed.select("id", F.lit('Parks/Playgrounds').alias("sem_type")).distinct()
+    return 'Parks/Playgrounds', df_left, df_processed.select(F.sum("_c1"), F.lit('Parks/Playgrounds').alias("sem_type"))
 
 
 def count_business(df_to_process):
@@ -351,7 +378,7 @@ def count_business(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'Business Name', df_left, df_processed.select("id", F.lit('Business Name').alias("sem_type")).distinct()
+    return 'Business Name', df_left, df_processed.select(F.sum("_c1"), F.lit('Business Name').alias("sem_type"))
 
 
 def count_location_type(df_to_process):
@@ -359,7 +386,7 @@ def count_location_type(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'Location Type', df_left, df_processed.select("id", F.lit("Location Type").alias("sem_type")).distinct()
+    return 'Location Type', df_left, df_processed.select(F.sum("_c1"), F.lit("Location Type").alias("sem_type"))
 
 
 def count_school_name(df_to_process):
@@ -367,7 +394,7 @@ def count_school_name(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'school_name', df_left, df_processed.select("id", F.lit('school_name').alias("sem_type")).distinct()
+    return 'school_name', df_left, df_processed.select(F.sum("_c1"), F.lit('school_name').alias("sem_type"))
 
 
 def count_color(df_to_process):
@@ -376,13 +403,13 @@ def count_color(df_to_process):
                                                     F.lower(df_pre_color._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_left, df_pre_city_agency_abbrev)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'color', df_left, df_processed.select("id", F.lit('color').alias("sem_type")).distinct()
+    return 'color', df_left, df_processed.select(F.sum("_c1"), F.lit('color').alias("sem_type"))
 
 
 def count_city_agency(df_to_process):
     df_processed = calc_jaccard_sim(df_to_process, df_pre_city_agency)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'city_agency', df_left, df_processed.select("id", F.lit('city_agency').alias("sem_type")).distinct()
+    return 'city_agency', df_left, df_processed.select(F.sum("_c1"), F.lit('city_agency').alias("sem_type"))
 
 
 def count_city_agency_abbrev(df_to_process):
@@ -390,7 +417,7 @@ def count_city_agency_abbrev(df_to_process):
                                       F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_city_agency_abbrev._c0)) < 1)
     # df_processed = calc_jaccard_sim(df_left, df_pre_city_agency_abbrev)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'city_agency', df_left, df_processed.select("id", F.lit('city_agency').alias("sem_type")).distinct()
+    return 'city_agency', df_left, df_processed.select(F.sum("_c1"), F.lit('city_agency').alias("sem_type"))
 
 
 def count_area_study(df_to_process):
@@ -398,7 +425,7 @@ def count_area_study(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'area_of_study', df_left, df_processed.select("id", F.lit('area_of_study').alias("sem_type")).distinct()
+    return 'area_of_study', df_left, df_processed.select(F.sum("_c1"), F.lit('area_of_study').alias("sem_type"))
 
 
 def count_subject(df_to_process):
@@ -406,7 +433,7 @@ def count_subject(df_to_process):
     #                                   F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
     df_processed = calc_jaccard_sim(df_to_process, df_pre_subject)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'subject_in_school', df_left, df_processed.select("id", F.lit('subject_in_school').alias("sem_type")).distinct()
+    return 'subject_in_school', df_left, df_processed.select(F.sum("_c1"), F.lit('subject_in_school').alias("sem_type"))
 
 
 def count_school_level(df_to_process):
@@ -414,7 +441,7 @@ def count_school_level(df_to_process):
                                       F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_school_level._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_to_process, df_pre_school_level)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'school_level', df_left, df_processed.select("id", F.lit('school_level').alias("sem_type")).distinct()
+    return 'school_level', df_left, df_processed.select(F.sum("_c1"), F.lit('school_level').alias("sem_type"))
 
 
 def count_college_name(df_to_process):
@@ -422,7 +449,7 @@ def count_college_name(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.join(df_processed, ["id"], "left_anti")
-    return 'college_name', df_left, df_processed.select("id", F.lit('college_name').alias("sem_type")).distinct()
+    return 'college_name', df_left, df_processed.select(F.sum("_c1"), F.lit('college_name').alias("sem_type"))
 
 
 def pre_compute_vehicle_type():
@@ -667,13 +694,13 @@ if __name__ == "__main__":
         .appName("big_data_proj_part2") \
         .config("spark.some.config.option", "some-value") \
         .getOrCreate()
-    conf = spark.sparkContext._conf.setAll(
-        [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
-         ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
-    spark.sparkContext.stop()
-    spark = SparkSession.builder.config(conf=conf).getOrCreate()
-    new_conf = spark.sparkContext._conf.getAll()
-    print(new_conf)
+    # conf = spark.sparkContext._conf.setAll(
+    #     [('spark.executor.memory', '8g'), ('spark.app.name', 'big_data_proj'), ('spark.executor.cores', '4'),
+    #      ('spark.cores.max', '4'), ('spark.driver.memory', '8g')])
+    # spark.sparkContext.stop()
+    # spark = SparkSession.builder.config(conf=conf).getOrCreate()
+    # new_conf = spark.sparkContext._conf.getAll()
+    # print(new_conf)
     df_pre_park = pre_compute_park()
     df_pre_park = df_pre_park.cache()
 
