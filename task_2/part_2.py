@@ -344,7 +344,7 @@ def website_regex(val):
 
 
 def count_other(df_to_process):
-    return "Other", df_to_process, df_to_process.select(F.sum("_c1"), F.lit("Other").alias("sem_type"))
+    return "other", df_to_process, df_to_process.select(F.sum("_c1"), F.lit("other").alias("sem_type"))
 
 
 def count_website(df_to_process):
@@ -353,7 +353,7 @@ def count_website(df_to_process):
     df_processed = df_to_process2.filter(udf_website_regex(df_to_process2._c0_trim) == True)
     df_left = df_to_process2.filter(F.col("id").isin(df_processed["id"]))
     df_left = df_left.drop("_c0_trim")
-    return 'Websites', df_left, df_processed.select(F.sum("_c1"), F.lit('Websites').alias("sem_type"))
+    return 'website', df_left, df_processed.select(F.sum("_c1"), F.lit('website').alias("sem_type"))
 
 
 def building_code_regex(val):
@@ -367,21 +367,21 @@ def count_building_code(df_to_process):
     df_processed = df_to_process2.filter(udf_building_code_regex(df_to_process2._c0_trim) == True)
     df_left = df_to_process2.filter(F.col("id").isin(df_processed["id"]))
     df_left = df_left.drop("_c0_trim")
-    return 'Building Code', df_left, df_processed.select(F.sum("_c1"), F.lit('Building Code').alias("sem_type"))
+    return 'building_classification', df_left, df_processed.select(F.sum("_c1"), F.lit('building_classification').alias("sem_type"))
 
 
 def count_car_make(df_to_process):
     df_processed = df_to_process.join(df_pre_car_make, F.levenshtein(F.lower(df_to_process._c0), F.lower(df_pre_car_make._c0)) < 3)
     # df_processed = calc_jaccard_sim(df_to_process, df_pre_car_make)
     df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
-    return 'Car make', df_left, df_processed.select(F.sum("_c1"), F.lit('Car make').alias("sem_type"))
+    return 'car_make', df_left, df_processed.select(F.sum("_c1"), F.lit('car_make').alias("sem_type"))
 
 
 def count_vehicle_type(df_to_process):
     # df_processed = df_to_process.join(df_pre_vehicle_type, levenshtein(lower(df_to_process._c0), lower(df_pre_vehicle_type._c0)) < 2)
     df_processed = calc_jaccard_sim(df_to_process, df_pre_vehicle_type)
     df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
-    return 'Vehicle Type', df_left, df_processed.select(F.sum("_c1"), F.lit('Vehicle Type').alias("sem_type"))
+    return 'vehicle_type', df_left, df_processed.select(F.sum("_c1"), F.lit('vehicle_type').alias("sem_type"))
 
 
 def count_parks(df_to_process):
@@ -389,7 +389,7 @@ def count_parks(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
-    return 'Parks/Playgrounds', df_left, df_processed.select(F.sum("_c1"), F.lit('Parks/Playgrounds').alias("sem_type"))
+    return 'park_playground', df_left, df_processed.select(F.sum("_c1"), F.lit('parks_playground').alias("sem_type"))
 
 
 def count_business(df_to_process):
@@ -397,7 +397,7 @@ def count_business(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
-    return 'Business Name', df_left, df_processed.select(F.sum("_c1"), F.lit('Business Name').alias("sem_type"))
+    return 'business_name', df_left, df_processed.select(F.sum("_c1"), F.lit('business_name').alias("sem_type"))
 
 
 def count_location_type(df_to_process):
@@ -405,7 +405,7 @@ def count_location_type(df_to_process):
     df_score = get_tokens_match_over_diff(df_cross_join)
     df_processed = df_score.filter(df_score.score > .3)
     df_left = df_to_process.filter(F.col("id").isin(df_processed["id"]))
-    return 'Location Type', df_left, df_processed.select(F.sum("_c1"), F.lit("Location Type").alias("sem_type"))
+    return 'location_type', df_left, df_processed.select(F.sum("_c1"), F.lit("location_type").alias("sem_type"))
 
 
 def count_school_name(df_to_process):
