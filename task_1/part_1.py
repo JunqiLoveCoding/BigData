@@ -27,7 +27,8 @@ def main(start_index, end_index):
     files = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
     pfiles = [(x.split()[7], int(x.split()[4])) for x in files[1:]]
     pfiles_sorted = sorted(pfiles, key=lambda x: x[1])
-    os.mkdir('job_{}_{}'.format(start_index, end_index))
+    if not os.path.exists('job_{}_{}'.format(start_index, end_index)):
+        os.mkdir('job_{}_{}'.format(start_index, end_index))
     for i, nyc_open_datafile in enumerate(pfiles_sorted[start_index:end_index]):
         print("processing number {} of {}".format(i+start_index, end_index))
         # pretty hacky preprocessing but it will work for now
@@ -37,6 +38,8 @@ def main(start_index, end_index):
         try:
             file_name = processed_path.split('/')[-1].replace('.tsv.gz', '')
             print(file_name)
+            if os.path.exists("job_{}_{}/{}.json".format(start_index, end_index, file_name)):
+                continue
             start_process = time.time()
             bp = BasicProfiling(processed_path, df_nod)
             table_dict = bp.process()

@@ -120,17 +120,17 @@ def main():
      'rmv8-86p4.BROOKLYN_CONDOMINIUM_PROPERTY_Neighborhood.txt.gz']
 
     # sort files according to size
-    directory = os.path.join(os.sep, "user", "hm74", "NYCColumns")
-    file_paths = os.path.join(directory, db_list[0])
-    for file in db_list[1:]:
-        location = os.path.join(directory, file)
-        file_paths = file_paths + ' ' + location
-
-    cmd = 'hadoop fs -du -s ' + file_paths
-    file_sizes = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
-    pairs = [(int(x.split()[0]), x.split()[-1]) for x in file_sizes]
-    pairs.sort(key=lambda s: s[0])
-    db_list_sorted = [s[1][22:] for s in pairs]
+    # directory = os.path.join(os.sep, "user", "hm74", "NYCColumns")
+    # file_paths = os.path.join(directory, db_list[0])
+    # for file in db_list[1:]:
+    #     location = os.path.join(directory, file)
+    #     file_paths = file_paths + ' ' + location
+    #
+    # cmd = 'hadoop fs -du -s ' + file_paths
+    # file_sizes = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+    # pairs = [(int(x.split()[0]), x.split()[-1]) for x in file_sizes]
+    # pairs.sort(key=lambda s: s[0])
+    # db_list_sorted = [s[1][22:] for s in pairs]
 
     # strategy pattern usually you would have a class then extend and apply, but this will do.
     functions = [count_website, count_zip_code, count_phone_number, count_lat_lon, count_borough, count_vehicle_type,
@@ -145,47 +145,51 @@ def main():
     ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
     ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
     pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
-    for file in db_list_sorted:
+    for file in db_list:
         if os.path.exists("task2_json/{}.json".format(file)):
             print('{} is already processed'.format(file))
             continue
-        processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
-        df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
-        df_to_process = df_to_process.withColumn("id", F.monotonically_increasing_id())
-        pad_udf = F.udf(pad_custom)
-        df_to_process = df_to_process.withColumn('_c0_pad', pad_udf("_c0"))
-        for stage in pipeline:
-            df_to_process = stage.transform(df_to_process)
-        start = time.time()
-        for i, function in enumerate(functions):
-            print("processing file {} function {}".format(file, function))
-            sem_name, df_to_process, df_processed = function(df_to_process)
-            if i == 8:
-                # oh look another thing nyu hpc infra can't do properly, looks like they didn't set up localcheckpointing.
-                # when doing itarative operations, i.e. applying functions to check rows, on joins you get degredation.
-                # One way to solve it is localcheckpointing, it will disguard the history of the transformation.
-                # df_to_process.rdd.localCheckpoint()
-                print("writing in and out")
-                df_to_process.write.mode("overwrite").parquet("process_{}.parquet".format(i))
-                df_to_process = spark.read.parquet("process_{}.parquet".format(i))
-                print("finished writing in")
-            if i == 16:
-                print("writing in and out")
-                df_to_process.write.mode("overwrite").parquet("process_{}.parquet".format(i))
-                df_to_process = spark.read.parquet("process_{}.parquet".format(i))
-                print("finished writing in")
-            if i == 0:
-                df_full = df_processed
-            else:
-                df_full = df_full.union(df_processed)
-            print("sem name {}".format(sem_name))
-            # print("sem_name {}, count {}, count left {}".format(sem_name, df_processed.count(), df_to_process.count()))
+        try:
+            processed_path = os.path.join(os.sep, "user", "hm74", "NYCColumns", file)
+            df_to_process = spark.read.option("delimiter", "\t").csv(processed_path)
 
-        df_complete = df_full.dropna().groupBy("sem_type").agg({"sum(_c1)": "sum"})
-        json_type = json.dumps(convert_df_to_dict(file, df_complete))
-        with open("task2_json/{}.json".format(file), 'w+', encoding="utf-8") as f:
-            f.write(json_type)
-        print("process time {}".format(time.time()-start))
+            df_to_process = df_to_process.withColumn("id", F.monotonically_increasing_id())
+            pad_udf = F.udf(pad_custom)
+            df_to_process = df_to_process.withColumn('_c0_pad', pad_udf("_c0"))
+            for stage in pipeline:
+                df_to_process = stage.transform(df_to_process)
+            start = time.time()
+            for i, function in enumerate(functions):
+                print("processing file {} function {}".format(file, function))
+                sem_name, df_to_process, df_processed = function(df_to_process)
+                if i == 8:
+                    # oh look another thing nyu hpc infra can't do properly, looks like they didn't set up localcheckpointing.
+                    # when doing itarative operations, i.e. applying functions to check rows, on joins you get degredation.
+                    # One way to solve it is localcheckpointing, it will disguard the history of the transformation.
+                    # df_to_process.rdd.localCheckpoint()
+                    print("writing in and out")
+                    df_to_process.write.mode("overwrite").parquet("process_{}.parquet".format(i))
+                    df_to_process = spark.read.parquet("process_{}.parquet".format(i))
+                    print("finished writing in")
+                if i == 16:
+                    print("writing in and out")
+                    df_to_process.write.mode("overwrite").parquet("process_{}.parquet".format(i))
+                    df_to_process = spark.read.parquet("process_{}.parquet".format(i))
+                    print("finished writing in")
+                if i == 0:
+                    df_full = df_processed
+                else:
+                    df_full = df_full.union(df_processed)
+                print("sem name {}".format(sem_name))
+                # print("sem_name {}, count {}, count left {}".format(sem_name, df_processed.count(), df_to_process.count()))
+
+            df_complete = df_full.dropna().groupBy("sem_type").agg({"sum(_c1)": "sum"})
+            json_type = json.dumps(convert_df_to_dict(file, df_complete))
+            with open("task2_json/{}.json".format(file), 'w+', encoding="utf-8") as f:
+                f.write(json_type)
+            print("process time {}".format(time.time()-start))
+        except Exception as e:
+            print("unable to process because {}".format(e))
 
 
 def convert_df_to_dict(file, df):
