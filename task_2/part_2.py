@@ -134,10 +134,10 @@ def main():
 
     # strategy pattern usually you would have a class then extend and apply, but this will do.
     functions = [count_website, count_zip_code, count_phone_number, count_lat_lon, count_borough,
-                 count_vehicle_type, count_color, count_car_make, count_building_code, count_location_type, count_city_agency_abbrev,
-                 count_city_agency, count_subject, count_area_study, count_school_level, count_address_street_name,
+                 count_color, count_car_make, count_building_code, count_location_type, count_city_agency_abbrev,
+                 count_subject, count_area_study, count_school_level, count_address_street_name,
                  count_school_name, count_college_name, count_parks, count_business, count_neighborhood,
-                 count_person_name, count_other]
+                 count_person_name, count_vehicle_type, count_subject, count_city_agency, count_other]
     tokenizer = Tokenizer(inputCol="_c0", outputCol="token_raw")
     remover = StopWordsRemover(inputCol="token_raw", outputCol="token_filtered")
     regex_tokenizer = RegexTokenizer(inputCol="_c0", outputCol="letters", pattern="")
@@ -146,7 +146,7 @@ def main():
     ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
     pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
     db_list = list(set(db_list))
-    for file in db_list:
+    for file in db_list[90:180]:
         if os.path.exists("task2_json/{}.json".format(file)):
             print('{} is already processed'.format(file))
             continue
