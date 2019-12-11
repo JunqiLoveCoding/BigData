@@ -145,6 +145,7 @@ def main():
     ngram = NGram(n=3, inputCol="letters", outputCol="ngrams")
     ngram_pad = NGram(n=3, inputCol="letters_pad", outputCol="ngrams_pad")
     pipeline = [tokenizer, remover, regex_tokenizer, regex_tokenizer_pad, ngram, ngram_pad]
+    db_list = list(set(db_list))
     for file in db_list:
         if os.path.exists("task2_json/{}.json".format(file)):
             print('{} is already processed'.format(file))
